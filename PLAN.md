@@ -192,3 +192,57 @@ node scripts/provider-oracle.mjs --wait 120               # 排除冷启动时�
 PROVIDER_ORACLE_BOOT=1 …                                  # 打印 boot 期全部输出
 ```
 
+## 8. 会话解剖 / 上下文预算体检（2026-10-15）
+
+`scripts/session-anatomy.mjs` —— 目标 3「还能继续对话」的仪表。**只读**。
+
+### 8.1 有效上下文口径（本会话确立）
+
+`inputTokens + cacheReadTokens + cacheWriteTokens`。**只加 `inputTokens` 会严重
+低估**：缓存命中的部分不进 `inputTokens`。实测锚点（session 7c5ee6b6）：
+
+| turn | provider/model | input | cacheRead | 有效上下文 |
+|---|---|---|---|---|
+| 2 | our-free-model/mimo-v2.6-flash-free | 157 | 186,304 | 186,461 |
+| 3 | our-free-model/mimo-v2.6-flash-free | 2,450 | 195,072 | 197,522 |
+| 4 | loomy/spark-x | 2,091 | 254,400 | 256,491 |
+| 5 | workbuddy/deepseek-v4.1-flash | 860 | 317,312 | 318,172 |
+| 8 | deepseek-official/deepseek-flash | 505,671 | 21,632 | **527,303** |
+
+### 8.2 定案：`CONTEXT_WINDOW_EXCEEDED` 与「改写导致超限」无关
+
+用户报告「被你改写的那个对话后续无法继续」。实测证据链：
+
+1. 备份 vs 当前，**共有事件只有 1 个不同**：`assistant/message seq=1032`，
+   正文 **1,360 → 140 字符（-1,220）**。改写让上下文**变小**。
+2. 所有 `reasoning` 块签名数 = 0（无签名被剥除）；`compaction` 事件 0 个。
+3. 报错发生在**另一个会话** `session-7c5ee6b6`（`parentSession = session-2915d6b2`，
+   `isSeeded: true` —— 用户从被改写会话**分叉**出来的）。
+4. 该会话 turn 8（17:27:42）在 **1M 窗口的 `deepseek-official/deepseek-flash`** 上
+   成功跑完，宿主自报上下文已达 **527,303 tokens**。
+5. 51 分钟后（18:18:21）用户切到 **`buddy/hy3`**（上游声明 100,000 窗口）→
+   turn 9/10 `CONTEXT_WINDOW_EXCEEDED`；**compaction 三次全失败**（同一 400，
+   压缩请求自己也超限 → 自锁，小窗口模型救不回来）。
+6. 该会话字符构成：`reasoning 705,576 / text 7,843 / tool-result 515,342`
+   —— 有效内容里 **89% 是推理**，`reasoning` 是全部 assistant 正文的 90 倍。
+
+→ 根因是**会话自己膨胀到 527K tokens 后被切到了 100K 窗口的模型**，不是改写。
+
+### 8.3 工具设计上的两个修正
+
+- **`--json` 模式原本恒 `exit 0`**，blocker 也返回 0，与文本模式的退出码口径
+  不一致（脚本链式判断会失效）。现在两种模式**共用同一退出码**：
+  blocker → 2 / 正常 → 0 / 找不到文件 → 1。
+- 分析逻辑抽成 `analyzeSession()`（纯函数）、CLI 抽成 `runCli(argv, io)`
+  （可注入 stdout/stderr），CLI 只是薄壳。**测试因此直接 import，不 spawn
+  子进程**——本沙箱禁止 node 进程再 spawn（`EBUSY`，连 `cmd.exe` 都起不来）。
+
+### 8.4 复现命令
+
+```bash
+node scripts/session-anatomy.mjs --list                    # 50 个会话，按 mtime 倒序
+node scripts/session-anatomy.mjs --session 7c5ee6b6        # 文本报告
+node scripts/session-anatomy.mjs --session 7c5ee6b6 --json # 机器可读
+node scripts/session-anatomy.mjs --file <会话文件> --marker FORGE-OK  # 查伪造痕迹
+```
+
