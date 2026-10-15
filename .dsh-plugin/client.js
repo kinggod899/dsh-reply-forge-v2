@@ -3,7 +3,7 @@ window.__ModuleLoader__.load({
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
-var __my_forge_v2__dsh_plugin_client_styles_mjs = (function(){ 
+var __m_dsh_plugin_client_styles_mjs = (function(){ 
 
 
 
@@ -83,8 +83,8 @@ const CSS = `
 `
 
  return { CSS: CSS } })();
-var CSS = __my_forge_v2__dsh_plugin_client_styles_mjs.CSS;
-var __my_forge_v2__dsh_plugin_client_picker_mjs = (function(){ 
+var CSS = __m_dsh_plugin_client_styles_mjs.CSS;
+var __m_dsh_plugin_client_picker_mjs = (function(){ 
 
 
 
@@ -250,11 +250,11 @@ function conversationRoot(doc = document) {
 }
 
  return { pickAssistantBlocks: pickAssistantBlocks, conversationRoot: conversationRoot, CONVERSATION_SELECTOR: CONVERSATION_SELECTOR, TAKEN_ATTR: TAKEN_ATTR, MIN_TEXT: MIN_TEXT } })();
-var CONVERSATION_SELECTOR = __my_forge_v2__dsh_plugin_client_picker_mjs.CONVERSATION_SELECTOR;
-var TAKEN_ATTR = __my_forge_v2__dsh_plugin_client_picker_mjs.TAKEN_ATTR;
-var pickAssistantBlocks = __my_forge_v2__dsh_plugin_client_picker_mjs.pickAssistantBlocks;
-var conversationRoot = __my_forge_v2__dsh_plugin_client_picker_mjs.conversationRoot;
-var __mforge_v2__dsh_plugin_client_markdown_mjs = (function(){ 
+var CONVERSATION_SELECTOR = __m_dsh_plugin_client_picker_mjs.CONVERSATION_SELECTOR;
+var TAKEN_ATTR = __m_dsh_plugin_client_picker_mjs.TAKEN_ATTR;
+var pickAssistantBlocks = __m_dsh_plugin_client_picker_mjs.pickAssistantBlocks;
+var conversationRoot = __m_dsh_plugin_client_picker_mjs.conversationRoot;
+var __m_dsh_plugin_client_markdown_mjs = (function(){ 
 
 
 
@@ -493,8 +493,8 @@ function renderMarkdown(container, source, docOverride) {
 }
 
  return { renderMarkdown: renderMarkdown } })();
-var renderMarkdown = __mforge_v2__dsh_plugin_client_markdown_mjs.renderMarkdown;
-var __mforge_v2__dsh_plugin_client_classify_mjs = (function(){ 
+var renderMarkdown = __m_dsh_plugin_client_markdown_mjs.renderMarkdown;
+var __m_dsh_plugin_client_classify_mjs = (function(){ 
 
 
 
@@ -613,8 +613,8 @@ function partitionEditable(blocks) {
 }
 
  return { classifyNaturalLanguage: classifyNaturalLanguage, partitionEditable: partitionEditable } })();
-var classifyNaturalLanguage = __mforge_v2__dsh_plugin_client_classify_mjs.classifyNaturalLanguage;
-var __mly_forge_v2__dsh_plugin_client_store_mjs = (function(){ 
+var classifyNaturalLanguage = __m_dsh_plugin_client_classify_mjs.classifyNaturalLanguage;
+var __m_dsh_plugin_client_store_mjs = (function(){ 
 
 
 
@@ -757,16 +757,16 @@ function savePrefs(prefs) {
 }
 
  return { isPlaceholderSession: isPlaceholderSession, currentSessionId: currentSessionId, fingerprint: fingerprint, loadOverrides: loadOverrides, setOverride: setOverride, removeOverride: removeOverride, clearOverrides: clearOverrides, loadPrefs: loadPrefs, savePrefs: savePrefs, PLACEHOLDER_SESSION: PLACEHOLDER_SESSION } })();
-var currentSessionId = __mly_forge_v2__dsh_plugin_client_store_mjs.currentSessionId;
-var isPlaceholderSession = __mly_forge_v2__dsh_plugin_client_store_mjs.isPlaceholderSession;
-var fingerprint = __mly_forge_v2__dsh_plugin_client_store_mjs.fingerprint;
-var loadOverrides = __mly_forge_v2__dsh_plugin_client_store_mjs.loadOverrides;
-var setOverride = __mly_forge_v2__dsh_plugin_client_store_mjs.setOverride;
-var removeOverride = __mly_forge_v2__dsh_plugin_client_store_mjs.removeOverride;
-var clearOverrides = __mly_forge_v2__dsh_plugin_client_store_mjs.clearOverrides;
-var loadPrefs = __mly_forge_v2__dsh_plugin_client_store_mjs.loadPrefs;
-var savePrefs = __mly_forge_v2__dsh_plugin_client_store_mjs.savePrefs;
-var __my_forge_v2__dsh_plugin_client_record_mjs = (function(){ 
+var currentSessionId = __m_dsh_plugin_client_store_mjs.currentSessionId;
+var isPlaceholderSession = __m_dsh_plugin_client_store_mjs.isPlaceholderSession;
+var fingerprint = __m_dsh_plugin_client_store_mjs.fingerprint;
+var loadOverrides = __m_dsh_plugin_client_store_mjs.loadOverrides;
+var setOverride = __m_dsh_plugin_client_store_mjs.setOverride;
+var removeOverride = __m_dsh_plugin_client_store_mjs.removeOverride;
+var clearOverrides = __m_dsh_plugin_client_store_mjs.clearOverrides;
+var loadPrefs = __m_dsh_plugin_client_store_mjs.loadPrefs;
+var savePrefs = __m_dsh_plugin_client_store_mjs.savePrefs;
+var __m_dsh_plugin_client_record_mjs = (function(){ 
 
 
 
@@ -931,13 +931,13 @@ async function forgeRecord(payload) {
 }
 
  return { normalizeText: normalizeText, loadRecord: loadRecord, cachedRecord: cachedRecord, resetCache: resetCache, recordNeedsRefresh: recordNeedsRefresh, matchBlocks: matchBlocks, forgeRecord: forgeRecord } })();
-var loadRecord = __my_forge_v2__dsh_plugin_client_record_mjs.loadRecord;
-var cachedRecord = __my_forge_v2__dsh_plugin_client_record_mjs.cachedRecord;
-var resetCache = __my_forge_v2__dsh_plugin_client_record_mjs.resetCache;
-var matchBlocks = __my_forge_v2__dsh_plugin_client_record_mjs.matchBlocks;
-var normalizeText = __my_forge_v2__dsh_plugin_client_record_mjs.normalizeText;
-var forgeRecord = __my_forge_v2__dsh_plugin_client_record_mjs.forgeRecord;
-var recordNeedsRefresh = __my_forge_v2__dsh_plugin_client_record_mjs.recordNeedsRefresh;
+var loadRecord = __m_dsh_plugin_client_record_mjs.loadRecord;
+var cachedRecord = __m_dsh_plugin_client_record_mjs.cachedRecord;
+var resetCache = __m_dsh_plugin_client_record_mjs.resetCache;
+var matchBlocks = __m_dsh_plugin_client_record_mjs.matchBlocks;
+var normalizeText = __m_dsh_plugin_client_record_mjs.normalizeText;
+var forgeRecord = __m_dsh_plugin_client_record_mjs.forgeRecord;
+var recordNeedsRefresh = __m_dsh_plugin_client_record_mjs.recordNeedsRefresh;
 
 
 

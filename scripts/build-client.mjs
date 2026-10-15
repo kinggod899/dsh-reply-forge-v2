@@ -8,7 +8,7 @@
 // 约束：源码只用 import ... from './x.mjs' / export function|const，
 // 不使用 export default、import() 动态导入与循环依赖。
 import { readFileSync, writeFileSync, statSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const ROOT = resolve(import.meta.dirname, '..')
@@ -170,8 +170,11 @@ function bundle(file, seen = new Map()) {
   return seen.get(abs)
 }
 
-function safeId(path) {
-  return path.replace(/[^A-Za-z0-9]/g, '_').slice(-40)
+/** 模块 id 只由「相对仓库根的路径」决定，与仓库装在哪里无关。
+ *  曾经这里直接用绝对路径再 slice(-40)，换个目录构建产物就变——
+ *  发行包解开后 build --check 必然不过，且任何克隆者重建都会得到不同字节。 */
+function safeId(absPath) {
+  return relative(ROOT, absPath).replace(/[^A-Za-z0-9]/g, '_')
 }
 
 export function generate({ check = false } = {}) {

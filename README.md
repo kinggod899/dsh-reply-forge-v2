@@ -71,12 +71,11 @@ DSH 桌面端插件 v2：**真伪造**——改写的 AI 回复进入会话落�
   回答「这个会话还能不能继续对话」；
 - `scripts/frame-anatomy.mjs` —— 帧结构解剖辅助工具。
 
-测试 **71/71**：`session-log` 11 + `session-write` 15 + `session-anatomy` 7 +
-`client` 23 + `routes` 15。跑法：
+测试 **73/73**：`session-log` 11 + `session-write` 15 + `session-anatomy` 7 +
+`client` 23 + `routes` 15 + `build` 2。跑法：
 
 ```bash
 for f in tests/*.test.mjs; do node "$f"; done
-node scripts/build-client.mjs --check   # client.js 与源码是否一致
 ```
 
 ## 安装 / 启用 / 关闭
