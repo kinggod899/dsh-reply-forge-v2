@@ -69,17 +69,27 @@ export function loadLines(file) {
 }
 
 /**
- * 在行模型里定位目标 text 块。
+ * 在行模型里定位目标 text 块。三种寻址方式，优先级：seq+blockIndex > fingerprint > match。
+ *
+ * 为什么需要 seq 寻址：浏览器 half 拿不到写入器的 sha256 指纹——它只有
+ * **渲染后的 DOM 文本**，而磁盘上是 markdown 源码，两者对不上（`**粗体**`
+ * 渲染成「粗体」）。所以 UI 侧改用「事件 seq + 块索引」定位：这两个值从
+ * 只读路由读到的磁盘数据里原样带出来，与内容无关，天然稳定。
+ *
  * @param {Array} lines loadLines 产物
- * @param {{fingerprint?:string, match?:string}} where 二选一
+ * @param {{seq?:number, blockIndex?:number, fingerprint?:string, match?:string}} where
  * @returns {Array<{line:number,blockIndex:number,seq:number|null,text:string,fingerprint:string}>}
  */
 export function locateTargets(lines, where = {}) {
+  const bySeq = typeof where.seq === 'number' && typeof where.blockIndex === 'number'
   const hits = []
   lines.forEach((ln, i) => {
     if (ln.bad || ln.event === null) return
+    if (bySeq && ln.event.seq !== where.seq) return
     for (const ref of assistantTextBlockRefs(ln.event)) {
-      if (where.fingerprint !== undefined) {
+      if (bySeq) {
+        if (ref.blockIndex !== where.blockIndex) continue
+      } else if (where.fingerprint !== undefined) {
         if (ref.fingerprint !== where.fingerprint) continue
       } else if (where.match !== undefined) {
         if (!ref.text.includes(where.match)) continue
@@ -190,7 +200,11 @@ function selfVerify(file, expect) {
 /**
  * 执行一次伪造写入。
  * @param {string} file 会话文件路径
- * @param {{fingerprint?:string,match?:string,newText:string,strategy?:'preserve'|'merge',stripScope?:'same-event'|'all'|'none',dryRun?:boolean}} opts
+ * @param {{seq?:number, blockIndex?:number, fingerprint?:string, match?:string, newText:string,
+ *          expectText?:string, strategy?:'preserve'|'merge', stripScope?:'same-event'|'all'|'none',
+ *          dryRun?:boolean}} opts
+ *   寻址三选一：seq+blockIndex（UI 用）/ fingerprint / match。
+ *   expectText 给定时做陈旧校验：与磁盘当前文本不符即拒绝。
  * @returns {{ok:boolean,dryRun:boolean,targets:Array,stripped:number,backup?:string,verify?:object,strategy:string}}
  */
 export function forgeSession(file, opts) {
@@ -203,13 +217,28 @@ export function forgeSession(file, opts) {
 
   const originalEvents = readSessionEvents(file)
   const loaded = loadLines(file)
-  const targets = locateTargets(loaded.lines, { fingerprint: opts.fingerprint, match: opts.match })
+  const where = { fingerprint: opts.fingerprint, match: opts.match }
+  if (typeof opts.seq === 'number') { where.seq = opts.seq; where.blockIndex = opts.blockIndex }
+  const targets = locateTargets(loaded.lines, where)
   if (targets.length === 0) {
-    throw new Error('未命中任何 assistant/message text 块（fingerprint/match 无匹配）')
+    const how = typeof opts.seq === 'number'
+      ? `seq=${opts.seq} blockIndex=${opts.blockIndex}`
+      : (opts.fingerprint !== undefined ? 'fingerprint=' + opts.fingerprint : 'match')
+    throw new Error('未命中任何 assistant/message text 块（' + how + ' 无匹配）')
   }
-  if (targets.length > 1 && opts.fingerprint === undefined) {
+  if (targets.length > 1 && opts.fingerprint === undefined && typeof opts.seq !== 'number') {
     const list = targets.map(t => `  line#${t.line} seq=${t.seq} fp=${t.fingerprint} 「${t.text.replace(/\s+/g, ' ').slice(0, 40)}…」`).join('\n')
     throw new Error('match 命中多个块，请改用 --fingerprint 精确定位：\n' + list)
+  }
+  // 陈旧校验：调用方（UI）看到的那份文本必须与磁盘当前文本逐字节一致。
+  // 界面长时间开着、或同一会话在别处被改过时，seq 仍在但内容已变——
+  // 不校验就会把「用户以为在改 A」的编辑写到 B 上。
+  if (typeof opts.expectText === 'string' && targets[0].text !== opts.expectText) {
+    const stale = new Error('磁盘上的正文与预期不一致（界面看到的内容已过期），已拒绝写入。请刷新后重试。')
+    stale.code = 'STALE_TARGET'
+    stale.actual = targets[0].text
+    stale.expected = opts.expectText
+    throw stale
   }
 
   // 应用编辑

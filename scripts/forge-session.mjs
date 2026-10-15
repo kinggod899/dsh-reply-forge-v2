@@ -2,10 +2,16 @@
 //
 // 用法：
 //   node scripts/forge-session.mjs --session <id> --list
+//   node scripts/forge-session.mjs --session <id> --seq <n> --block-index <i> --text "<新正文>" --dry-run
 //   node scripts/forge-session.mjs --session <id> --match "<原文子串>" --text "<新正文>" --dry-run
 //   node scripts/forge-session.mjs --session <id> --fingerprint <fp> --text-file new.md
 //   node scripts/forge-session.mjs --file <会话文件路径> --match "..." --text "..."
 //   node scripts/forge-session.mjs --restore --file <会话文件> --backup <备份文件>
+//
+// 寻址三选一（优先级：seq > fingerprint > match）：
+//   --seq + --block-index  事件序号 + 块索引。UI 走这条（浏览器拿不到 sha256 指纹）
+//   --fingerprint          正文指纹 sha256 前 16 位，由 --list 给出
+//   --match                原文子串，命中多条时拒绝执行
 //
 // 选项：
 //   --strategy preserve|merge   帧策略，默认 preserve（逐帧重压，边界不变）
@@ -87,14 +93,17 @@ if (opt.list === true) {
   log('可寻址的助手正文块（' + blocks.length + ' 个）：')
   for (const b of blocks) {
     const preview = b.text.replace(/\s+/g, ' ').trim()
-    console.log(`  fp=${fingerprint(b.text)}  seq=${b.seq ?? '-'}  「${preview.slice(0, 56)}${preview.length > 56 ? '…' : ''}」`)
+    console.log(`  seq=${String(b.seq ?? '-').padStart(5)} block=${b.blockIndex}  fp=${fingerprint(b.text)}  「${preview.slice(0, 56)}${preview.length > 56 ? '…' : ''}」`)
   }
-  console.log('\n用 --fingerprint <fp> 精确定位；--match 在命中多个时会拒绝执行。')
+  console.log('\n用 --seq <n> --block-index <i> 或 --fingerprint <fp> 精确定位；--match 在命中多个时会拒绝执行。')
   process.exit(0)
 }
 
 // 目标
-if (opt.fingerprint === undefined && opt.match === undefined) die('需要 --fingerprint 或 --match（先用 --list 查看）')
+const useSeq = opt.seq !== undefined && opt['block-index'] !== undefined
+if (useSeq === false && opt.fingerprint === undefined && opt.match === undefined) {
+  die('需要 --seq <n> --block-index <i>、--fingerprint <fp> 或 --match "<子串>"（先用 --list 查看）')
+}
 if (opt.text === undefined && opt['text-file'] === undefined) die('需要 --text 或 --text-file')
 let newText = opt.text
 if (opt['text-file'] !== undefined && opt['text-file'] !== true) {
@@ -102,10 +111,12 @@ if (opt['text-file'] !== undefined && opt['text-file'] !== true) {
   newText = readFileSync(opt['text-file'], 'utf8')
 }
 
-const where = opt.fingerprint !== undefined ? { fingerprint: opt.fingerprint } : { match: opt.match }
+const where = useSeq
+  ? { seq: Number(opt.seq), blockIndex: Number(opt['block-index']) }
+  : (opt.fingerprint !== undefined ? { fingerprint: opt.fingerprint } : { match: opt.match })
 const hits = locateTargets(loaded.lines, where)
 if (hits.length === 0) die('未命中任何 assistant/message text 块')
-if (hits.length > 1 && opt.fingerprint === undefined) {
+if (hits.length > 1 && opt.fingerprint === undefined && useSeq === false) {
   log('match 命中多个块，请改用 --fingerprint：')
   for (const h of hits) console.log(`  fp=${h.fingerprint}  seq=${h.seq ?? '-'}  「${h.text.replace(/\s+/g, ' ').slice(0, 50)}…」`)
   process.exit(1)

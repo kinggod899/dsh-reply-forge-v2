@@ -180,6 +180,152 @@ test('assistantTextBlockRefs 只认 assistant/message 的 text 块', () => {
   assert.equal(refs2[0].fingerprint, fingerprint('y'))
 })
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v2.2 新增：seq + blockIndex 寻址（浏览器 half 的唯一可行寻址方式）
+// 背景：UI 只有渲染后的 DOM 文本，与磁盘 markdown 源码对不上，算不出指纹；
+// seq 与块索引从只读路由原样带出，与内容无关，天然稳定。
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('seq 寻址：按事件 seq + 块索引精确定位（指纹算不出时的唯一路径）', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'forge-'))
+  try {
+    const file = makeSession(dir)
+    const lines = loadLines(file).lines
+    // seq=3 的 assistant/message：content[0]=thinking, content[1]=text
+    const hits = locateTargets(lines, { seq: 3, blockIndex: 1 })
+    assert.equal(hits.length, 1)
+    assert.equal(hits[0].seq, 3)
+    assert.equal(hits[0].blockIndex, 1)
+    assert.ok(hits[0].text.includes('斐波那契'))
+    // 同 seq 指到 thinking 块 → 不是 text 块，无命中
+    assert.equal(locateTargets(lines, { seq: 3, blockIndex: 0 }).length, 0)
+    // seq 存在但块索引越界 → 无命中
+    assert.equal(locateTargets(lines, { seq: 3, blockIndex: 9 }).length, 0)
+    // seq 不存在 → 无命中
+    assert.equal(locateTargets(lines, { seq: 999, blockIndex: 0 }).length, 0)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('seq 寻址写入：正文被替换、备份生成、自读通过、帧数不变', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'forge-'))
+  try {
+    const file = makeSession(dir)
+    const before = scanZstdFrames(require$read(file))
+    const r = forgeSession(file, {
+      seq: 3, blockIndex: 1,
+      newText: '伪造（seq 寻址）：这个函数其实是归并排序，稳定且 O(n log n)。',
+    })
+    assert.equal(r.ok, true)
+    assert.equal(r.dryRun, false)
+    assert.equal(r.targets.length, 1)
+    assert.equal(r.targets[0].seq, 3)
+    assert.equal(r.stripped, 2, '同事件签名应被剥')
+    assert.ok(typeof r.backup === 'string' && existsSync(r.backup), '必须留下备份')
+    assert.equal(r.verify.events, 9, '自读校验：事件数不变')
+    assert.equal(scanZstdFrames(require$read(file)).length, before.length, '帧数不变')
+
+    const asst = readSessionEvents(file).filter(e => e.type === 'assistant/message')
+    assert.ok(asst[0].data.message.content[1].text.includes('归并排序'))
+    // 未命中块与其它事件原样
+    assert.ok(asst[1].data.message.content[0].text.includes('如上所示，递归没有基线条件'))
+    assert.equal(asst[0].data.message.content[0].type, 'thinking')
+    assert.equal('signature' in asst[0].data.message.content[0], false)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('seq 寻址优先于指纹：两者都给时以 seq 为准', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'forge-'))
+  try {
+    const file = makeSession(dir)
+    // 故意给一个指向**另一条**回复的指纹；seq 应压过指纹。
+    const wrongFp = fingerprint('如上所示，递归没有基线条件，会无限递归，建议改成迭代写法。')
+    const r = forgeSession(file, {
+      seq: 3, blockIndex: 1, fingerprint: wrongFp,
+      newText: 'seq 说了算。',
+    })
+    assert.equal(r.targets.length, 1)
+    assert.equal(r.targets[0].seq, 3, '命中 seq=3 而不是指纹指向的 seq=7')
+    const asst = readSessionEvents(file).filter(e => e.type === 'assistant/message')
+    assert.equal(asst[0].data.message.content[1].text, 'seq 说了算。')
+    assert.ok(asst[1].data.message.content[0].text.includes('如上所示'), '指纹指向的那条不应被改')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('seq 指向 tool/result 等非 assistant 事件：拒绝且文件一字未动', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'forge-'))
+  try {
+    const file = makeSession(dir)
+    const before = require$read(file)
+    // seq=6 是 tool/result（含 text 块，但不是助手正文）
+    assert.throws(() => forgeSession(file, { seq: 6, blockIndex: 0, newText: '篡改工具输出' }), /未命中/)
+    assert.equal(before.equals(require$read(file)), true, '拒绝时不得改动文件')
+    assert.equal(readdirSync(dir).filter(f => f.includes('.bak-forge-')).length, 0, '拒绝时不得产生备份')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v2.2 新增：expectText 陈旧校验（界面长时间开着 / 会话在别处被改过）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('expectText 与磁盘一致：正常写入', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'forge-'))
+  try {
+    const file = makeSession(dir)
+    const current = '这个函数的作用是计算斐波那契数列，使用了递归实现，注意栈深度。'
+    const r = forgeSession(file, { seq: 3, blockIndex: 1, expectText: current, newText: '一致，放心改。' })
+    assert.equal(r.ok, true)
+    const asst = readSessionEvents(file).filter(e => e.type === 'assistant/message')
+    assert.equal(asst[0].data.message.content[1].text, '一致，放心改。')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('expectText 与磁盘不符：拒绝写入，带 STALE_TARGET 与 actual/expected，文件一字未动', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'forge-'))
+  try {
+    const file = makeSession(dir)
+    const before = require$read(file)
+    const stale = '这是界面上看到、但磁盘上早已不是的旧文本。'
+    let caught = null
+    try {
+      forgeSession(file, { seq: 3, blockIndex: 1, expectText: stale, newText: '不该被写进去。' })
+    } catch (err) { caught = err }
+    assert.ok(caught !== null, '必须抛错')
+    assert.equal(caught.code, 'STALE_TARGET')
+    assert.equal(caught.expected, stale)
+    assert.ok(caught.actual.includes('斐波那契'), 'actual 应是磁盘当前真实正文')
+    assert.match(caught.message, /过期|不一致/)
+    assert.equal(before.equals(require$read(file)), true, '陈旧拒绝时不得改动文件')
+    assert.equal(readdirSync(dir).filter(f => f.includes('.bak-forge-')).length, 0, '陈旧拒绝时不得产生备份')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('expectText 走指纹寻址同样生效（陈旧校验不依赖寻址方式）', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'forge-'))
+  try {
+    const file = makeSession(dir)
+    const before = require$read(file)
+    const target = '如上所示，递归没有基线条件，会无限递归，建议改成迭代写法。'
+    assert.throws(
+      () => forgeSession(file, { fingerprint: fingerprint(target), expectText: '界面上的旧文本', newText: 'x' }),
+      err => err.code === 'STALE_TARGET',
+    )
+    assert.equal(before.equals(require$read(file)), true)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('dry-run + seq + expectText：三者共存时仍不落盘', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'forge-'))
+  try {
+    const file = makeSession(dir)
+    const before = require$read(file)
+    const current = '这个函数的作用是计算斐波那契数列，使用了递归实现，注意栈深度。'
+    const r = forgeSession(file, { seq: 3, blockIndex: 1, expectText: current, newText: '预演', dryRun: true })
+    assert.equal(r.dryRun, true)
+    assert.equal(r.wouldChangeLines.length, 1)
+    assert.equal(before.equals(require$read(file)), true, 'dry-run 不得改动文件')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 /** 读文件字节（测试辅助）。 */
 function require$read(file) {
   return readFileSync(file)

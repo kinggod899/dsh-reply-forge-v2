@@ -18,24 +18,47 @@ DSH 桌面端插件 v2：**真伪造**——改写的 AI 回复进入会话落�
 
 ## 当前状态（2026-10-15）
 
-**v2.0 已实现并完成读取侧验收；v2.1 / v2.2 未开工。** 设计与实证见 [PLAN.md](PLAN.md)。
+**v2.0 与 v2.2 已实现；v2.2 已安装进 desktop profile，等重启 DSH 生效。**
+设计与实证见 [PLAN.md](PLAN.md)。
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | v2.0 | 关闭态落盘改写器（CLI） | ✅ 实现完成，读取侧验收通过 |
-| v2.0 | 真机重启后模型侧采信 | ⬜ 待用户实测 |
+| v2.0 | 真机重启后模型侧采信 | ✅ 用户实测通过（编辑内容被大模型认可） |
 | v2.1 | 运行态写入（探针先行） | ⬜ 未开工 |
-| v2.2 | UI 合一（dsh 插件形态） | ⬜ 未开工 |
+| v2.2 | UI 合一（dsh 插件形态） | ✅ 实现完成，已安装，待重启验证 |
+| v2.2 | 真机重启后 UI 生效 | ⬜ 待用户实测 |
 
 已落地的代码：
 
+**写入内核（纯 ESM、零依赖）**
+
 - `src/session-log.mjs` —— 只读层（多帧 zstd JSONL 解析、正文块收窄），
   从 v1 移植，自带 52 个真实会话的解析验证史；
-- `src/session-write.mjs` —— 写入器核心：指纹寻址、剥签名、多帧重组、
-  原子写、写后自读校验；
-- `src/checkout.mjs` —— 会话副本检出的公共逻辑；
+- `src/session-write.mjs` —— 写入器核心：**seq+块索引 / 指纹**双寻址、
+  `expectText` 陈旧校验、剥签名、多帧重组、原子写、写后自读校验；
+- `src/checkout.mjs` —— 会话副本检出的公共逻辑。
+
+**插件形态（v2.2）**
+
+- `.dsh-plugin/index.mjs` —— host half：只声明 `inject: ['webServer']`，
+  `apply()` 全程 try/catch，任何异常都不会拖垮宿主启动；
+- `.dsh-plugin/server/routes.mjs` —— 两条 HTTP 路由：读块列表 / 执行写入。
+  写路由带自定义头校验、参数校验、超长拒绝，业务失败一律 200 + `ok:false`；
+- `.dsh-plugin/client/index.mjs` —— client half：在每条助手回复下挂操作条，
+  就地编辑器双出口（`仅本机渲染` / `写入会话记录`）；
+- `.dsh-plugin/client/record.mjs` —— 磁盘记录访问层 + DOM↔磁盘两级匹配；
+- `.dsh-plugin/client/{picker,markdown,classify,store,styles}.mjs` ——
+  从 v1 移植的 UI 模块（前缀全部改为 `rf2-`，与 v1 严格隔离）；
+- `.dsh-plugin/client.js` —— 构建产物（由 `scripts/build-client.mjs` 内联）。
+
+**脚本**
+
 - `scripts/forge-session.mjs` —— v2.0 写入 CLI（含 `--dry-run` / `--restore` /
-  dsh 运行中拒绝写入）；
+  `--seq` / `--block-index` / dsh 运行中拒绝写入）；
+- `scripts/install.mjs` / `enable.mjs` / `disable.mjs` / `profile-lib.mjs` ——
+  安装 / 启用 / 关闭（**只改静态配置，绝不跑 pnpm**）；
+- `scripts/build-client.mjs` —— client half 内联构建器（`--check` 校验新鲜度）；
 - `scripts/host-oracle.mjs` —— 宿主预言机：用宿主自己的 dsh 起 slim host，
   直连 RPC 读回改写后的会话，双跑（伪造 vs 原始）有区分度；
 - `scripts/provider-oracle.mjs` —— 照抄 App 真实启动配方起完整 desktop
@@ -44,7 +67,30 @@ DSH 桌面端插件 v2：**真伪造**——改写的 AI 回复进入会话落�
   回答「这个会话还能不能继续对话」；
 - `scripts/frame-anatomy.mjs` —— 帧结构解剖辅助工具。
 
-测试 **25/25**：`session-log` 11 + `session-write` 7 + `session-anatomy` 7。
+测试 **66/66**：`session-log` 11 + `session-write` 15 + `session-anatomy` 7 +
+`client` 18 + `routes` 15。跑法：
+
+```bash
+for f in tests/*.test.mjs; do node "$f"; done
+node scripts/build-client.mjs --check   # client.js 与源码是否一致
+```
+
+## 安装 / 启用 / 关闭
+
+三个一键脚本（双击即可，不需要命令行）：
+
+| 文件 | 作用 |
+|---|---|
+| `安装插件.bat` | 首次安装：建链接、写依赖、登记 lockfile、加入 bundles |
+| `启用插件.bat` | 已装但被关掉时，加回 bundles（不需要重新安装） |
+| `关闭插件.bat` | 停用：从 bundles 摘掉（保留链接与依赖，可秒开回来） |
+
+三者都**只修改 dsh 启动时读取的静态配置**，不执行 pnpm。安装脚本默认会
+顺手把 v1 从 bundles 里摘掉（两个插件同时启用会挂出两条操作条），但保留
+v1 的依赖与链接，v1 用它自己的 `启用插件.bat` 就能开回来。想两个都开：
+`node scripts/install.mjs --keep-v1`。
+
+**改完必须完全退出并重启 DSH 才生效。**
 
 ## 与 v1 的关系
 

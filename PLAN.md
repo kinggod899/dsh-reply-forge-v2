@@ -85,7 +85,7 @@ reasoning/thinking 块的 signature」= 过校验。
 - 若可热加载：把写入器接进 UI 保存链；若不可：UI 保存落盘时提示
   「重启后生效」。
 
-### v2.2 UI 合一（dsh 插件形态）
+### v2.2 UI 合一（dsh 插件形态）—— ✅ 已实现（2026-10-15，见 §9）
 
 - 复用 v1 的 UI 模式（chat.node 槽位 + markdown 容器 + 就地编辑器），
   但持久化目标改为「写入会话记录」；
@@ -245,4 +245,84 @@ node scripts/session-anatomy.mjs --session 7c5ee6b6        # 文本报告
 node scripts/session-anatomy.mjs --session 7c5ee6b6 --json # 机器可读
 node scripts/session-anatomy.mjs --file <会话文件> --marker FORGE-OK  # 查伪造痕迹
 ```
+
+## 9. v2.2 实现记录：UI 合一（2026-10-15）
+
+把 v2.0 的落盘改写从 CLI 搬进 dsh 插件形态：在回复下方挂操作条 → 就地编辑
+→ 一个按钮写进会话记录。设计上遇到并解决了四个真问题。
+
+### 9.1 核心难题：浏览器算不出写入器的指纹
+
+v1/v2.0 都用「正文哈希」寻址（`sha256(normalize(text)).slice(0,16)`）。
+但**浏览器只有渲染后的 DOM 文本，磁盘上是 markdown 源码**——`**粗体**`
+渲染成「粗体」，两者对不上，UI 侧**永远算不出**同一个指纹。
+
+→ 改用**「事件 `seq` + 块索引」寻址**：这两个值从只读路由读到的磁盘数据里
+原样带出来，与内容无关，天然稳定。`locateTargets()` 因此支持三种寻址，
+优先级 **`seq`+`blockIndex` > `fingerprint` > `match`**；`seq` 给定时指纹被
+完全忽略（有测试固定这条语义）。
+
+### 9.2 陈旧校验：`expectText`
+
+界面可能开很久，或同一会话在别处被改过——此时 `seq` 还在，但磁盘上的正文
+已经变了。不校验就会把「用户以为在改 A」的编辑写到 B 上。
+
+→ `forgeSession({ expectText })`：与磁盘当前文本**逐字节比对**，不符即抛
+`STALE_TARGET`（带 `actual` / `expected`），**一个字都不写、连备份都不建**。
+UI 侧捕获后提示「内容已过期，请刷新后重试」。
+
+### 9.3 POST 路由可行（照抄 dsh-tavern 的生产用法）
+
+读写都走 `ctx.webServer.register({ kind: 'exact', path, handler })`，handler
+收原生 node `req`/`res`，**POST 可用**（判 `req.method` + 自读 body）。写路由
+三重闸门：自定义头 `x-rf2-forge: 1`（挡掉跨站表单）、参数校验、`newText`
+超 512K 拒绝；**业务失败一律 200 + `ok:false`**，把 HTTP 状态码留给「请求
+本身不合法」。
+
+依赖用相对路径 `../../src/session-log.mjs` 引到仓库根的写入内核——单一事实
+来源，前提是插件以 junction 安装（`node_modules/@local/dsh-reply-forge-v2 →
+E:\文档\dsh-reply-forge-v2`），此时相对路径仍落在同一棵目录树里。
+
+### 9.4 从 v1 移植时修掉的四个真 bug
+
+| bug | 症状 | 修法 |
+|---|---|---|
+| `pickAssistantBlocks` 幂等守卫跳过已接管块 | **全接管后返回空列表** → 快捷键 `Alt+Shift+E` 静默失效（**v1 就有**） | 新增 `includeTaken` 选项，枚举用途传 `true` |
+| 正文访问器把自身 UI 算进正文 | 编辑框预填内容混入「伪造回复」按钮文字 → 落盘定位全退化成「按顺序推断」 | 新增 `ownText()`，递归排除 `OWN_UI_CLASSES` 与 `BUTTON`/`TEXTAREA` |
+| 提示写进「已展开进 DOM 的数组」 | 写入失败的提示**永远不显示** | 建独立 `notes` 容器再 `append` |
+| `.rf-primary` 是类选择器但代码设 `data-*` 属性 | **死样式**，主按钮从来就没有样式 | 改用属性选择器 `[data-rf2-primary]` |
+
+`applyOverride()` 会清空块的所有子节点，所以操作条必须在覆盖之后重建——
+抽出 `attachBar()` 统一处理，避免「已接管但无操作条」的中间态。
+
+### 9.5 安装链路（沿用 v1 的教训）
+
+铁律不变：**dsh 运行时绝不执行 `pnpm install`**（2026-10-14 事故根因）。
+`scripts/install.mjs` 只做静态配置改动：
+
+1. 建 junction（`fs.symlinkSync(target, dest, 'junction')`——Windows 下无需
+   管理员权限，也不必 spawn `mklink`）；
+2. `package.json` 写 `dependencies` + 追加 `dsh.profile.bundles`；
+3. **手工登记 `pnpm-lock.yaml` 条目**——不登记的话，将来任何一次 pnpm 对账
+   都会把这条 link 判为多余并删掉；
+4. 清掉 `cordis.patch.yml` 里两个插件可能残留的 `disabled` 条目。
+
+**只在真要写文件时才做备份**，所以重复执行不堆垃圾（v1 的脚本每次跑都产生
+3 份备份，攒了 20 多个）。全程幂等，演练 + 实机各验证过一次。
+
+两个插件同时启用会挂两条操作条，所以安装脚本默认把 v1 从 bundles 摘掉，
+但**保留 v1 的依赖与 junction**——v1 随时能秒开回来，不需要重装。
+
+### 9.6 测试
+
+| 套件 | 数量 | 覆盖 |
+|---|---|---|
+| `session-log` | 11 | 多帧解析、正文块收窄 |
+| `session-write` | 15 | 指纹/match 寻址、**seq 寻址**、**`expectText` 陈旧拒绝**、剥签名、dry-run、merge、tool/result 不可寻址 |
+| `session-anatomy` | 7 | 上下文预算体检、退出码口径 |
+| `client` | 18 | 走构建产物 `client.js`：操作条、编辑器双出口、二次确认、陈旧提示、快捷键、调试命名空间 |
+| `routes` | 15 | 两条路由：目录穿越、缺头 403、缺参 400、超长 413、正常写入、陈旧拒绝、越界拒绝 |
+
+合计 **66/66**。`client.test.mjs` 与 `routes.test.mjs` 是 v2.2 新增；
+`routes.test.mjs` 直接调 route handler（`DSH_HOME` 指临时目录），走真实文件系统。
 
