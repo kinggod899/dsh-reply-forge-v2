@@ -13,3 +13,4 @@ node_modules/
 Thumbs.db
 desktop.ini
 .DS_Store
+scripts/diag.config.json

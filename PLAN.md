@@ -74,10 +74,10 @@ reasoning/thinking 块的 signature」= 过校验。
 - `forge-session.mjs`：`--session <id> --fingerprint <fp> --text "<新正文>"`
   或 `--match "<原文子串>"`；备份 → 解帧 → 定位 → 替换 → 剥签名 →
   组帧写回 → 自读校验；
-- 帧策略**待实测**：原样重组多帧 vs 合并单帧（用真实会话副本各试一次，
-  看宿主读取结果，再定默认）；
+- 帧策略**已实测**：真实会话副本（315 帧 / 1037 事件 / 29 个正文块）
+  round-trip 通过——原样重组多帧（preserve）被宿主完整读出，见 §6；
 - 测试：真实会话副本 round-trip（解析→改→写→再解析）+ 沙箱 host 打开
-  副本不报错。
+  副本不报错（后者已由 §6 的宿主预言机完成）。
 
 ### v2.1 运行态写入（探针先行）
 
@@ -94,8 +94,43 @@ reasoning/thinking 块的 signature」= 过校验。
 
 ## 5. 待评审点
 
-1. **帧策略**（v2.0 阻塞项）：多帧重组 vs 合并单帧——先实测；
+1. ~~**帧策略**（v2.0 阻塞项）~~ **已决**：多帧重组（preserve）通过宿主
+   预言机验证，定为默认；merge 单帧保留为对照策略；
 2. v2 是否保留 v1 的「本机渲染覆盖」作为 UI 预览层（我的建议：保留，
    保存即同时写渲染覆盖 + 落盘，视觉零延迟）；
 3. 剥签名粒度：仅被编辑消息所在事件 vs 整文件统一剥（建议前者，
    影响面最小）。
+
+## 6. 实证记录：宿主预言机（2026-10-15）
+
+`scripts/host-oracle.mjs`：把 `DSH_HOME` 指向临时家目录（`sessions/` 里
+放改写后的会话副本），用**宿主自己的 dsh 安装**起一个 slim host
+（只保留 `@deepseek-ai/dsh-base` + `dsh-web-app` 两层），直连 RPC 读回：
+
+1. `session/list` → 拿到 sessionId（`blank=false`：宿主认这个会话）；
+2. `session/page` → 拿到宿主读出的历史事件。
+
+双跑结果（同一真实会话，伪造版 vs 原始版）：
+
+| 组 | 宿主启动 | 会话可见 | 宿主游标 | 伪造文本 |
+|---|---|---|---|---|
+| 伪造副本 | ✅ | ✅ | 1035 | ✅ `assistant/message seq=26` → **PASS** |
+| 原始副本 | ✅ | ✅ | 1035 | ❌ → **FAIL（exit 2）** |
+
+结论：宿主读取器**接受**我们改写的多帧 zstd 日志，且能把伪造正文作为
+正常 `assistant/message` 事件读出；预言机对伪造/原始有区分度（对照组
+必 FAIL）。这坐实了目标 2（模型认同）与目标 3（还能继续对话）的
+**读取侧**前提——宿主读到的就是我们写进去的内容。
+
+配方踩坑（详见脚本头注释）：
+- `boot()` 的 `patches` 是「叠加在 config 树上的 overlay」，把含 `include:`
+  的 bundle 层叠到已合成的 `cordis.yml` 上 → `duplicate loader entry id: timer`。
+  正解：空 leaf 配置 + `loadProfileDirectory` 取层；
+- 裸包名解析基 `bareModuleBaseUrl` 必须指向 dsh 安装目录（App 自带安装里
+  有开发 checkout 缺的包，如 `@deepseek-ai/dsh-agent-preset`）；
+- `?token=` 只对根路径 GET 有效 → 先换签名 cookie，后续 API 走 cookie；
+- `session/projections` 只回 baseline 投影（无 `turnOutline`），
+  拿真实历史要用 `session/page`（`throughSeq` 不得越过宿主游标）。
+
+尚未覆盖（v2.0 剩余验收项）：真机重启 dsh 打开会话，确认**模型侧**采信
+（伪造正文进入下一轮请求上下文）并能继续对话。
