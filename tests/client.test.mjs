@@ -56,12 +56,16 @@ function fireMutations(flush) {
 const tick = () => new Promise(resolve => setImmediate(resolve))
 
 /** fetch 桩：按 URL 分流到「读记录」与「写记录」。 */
-function makeFetch({ blocks = [], forgeResult = null } = {}) {
+function makeFetch({ blocks = [], forgeResult = null, readError = null } = {}) {
   const calls = []
   const fetchImpl = (url, init = {}) => {
     const u = String(url)
     calls.push({ url: u, init })
     if (u.includes('/session/blocks')) {
+      // readError 模拟「会话文件找不到」这类读失败（路由回 ok:false）。
+      if (readError !== null) {
+        return Promise.resolve({ status: 404, json: () => Promise.resolve({ ok: false, error: readError }) })
+      }
       return Promise.resolve({
         status: 200,
         json: () => Promise.resolve({ ok: true, sessionId: 'test-session', file: '/tmp/x', total: blocks.length, blocks }),
@@ -79,13 +83,21 @@ function makeFetch({ blocks = [], forgeResult = null } = {}) {
 /**
  * 搭一条会话：main.conversation 锚点 + N 个助手消息块 + fetch 桩。
  * 默认让磁盘记录与页面文本完全一致（精确匹配路径）。
+ *
+ * sessionAttr 是宿主渲染在会话容器上的当前会话 id
+ * （`data-conversation-session`）——dsh 的 URL 里没有会话 id，这是唯一来源。
+ * 传 null 模拟「容器还没挂载 / 属性缺失」。
  */
-function setup({ texts = [DEFAULT_TEXT], blocks = null, forgeResult = null, confirmResult = true } = {}) {
+function setup({
+  texts = [DEFAULT_TEXT], blocks = null, forgeResult = null, confirmResult = true,
+  sessionAttr = 'test-session', pathname = '/s/test-session', readError = null,
+} = {}) {
   const doc = createDocument()
   const storage = {}
-  const { window: win, pending, flush, confirmCalls, dispatch } = createWindow({ storage, confirmResult })
+  const { window: win, pending, flush, confirmCalls, dispatch } = createWindow({ storage, confirmResult, pathname })
   const conv = mk('div')
   conv.setAttribute('data-slot', 'main.conversation')
+  if (sessionAttr !== null) conv.setAttribute('data-conversation-session', sessionAttr)
   const msgs = texts.map(t => {
     const m = mk('div', 'Kwoi6G_body')
     m.append(mk('p', '', t))
@@ -96,7 +108,7 @@ function setup({ texts = [DEFAULT_TEXT], blocks = null, forgeResult = null, conf
   const diskBlocks = blocks === null
     ? texts.map((t, i) => ({ seq: 100 + i * 10, blockIndex: 1, text: t }))
     : blocks
-  const { calls, fetchImpl } = makeFetch({ blocks: diskBlocks, forgeResult })
+  const { calls, fetchImpl } = makeFetch({ blocks: diskBlocks, forgeResult, readError })
   return { doc, win, pending, flush, conv, msgs, msg: msgs[0], storage, calls, fetchImpl, confirmCalls, dispatch }
 }
 
@@ -335,18 +347,74 @@ test('定位失败（记录为空）→ 显示警示且落盘出口禁用', asyn
   const editor = openEditor(msg)
   const warn = editor.querySelector('.rf2-note-warn')
   assert.ok(warn !== null, '必须给出未定位警示')
-  assert.ok(warn.textContent.includes('未在会话记录中定位到'), '实际：' + warn.textContent)
+  assert.ok(warn.textContent.includes('没有可定位的助手正文'), '实际：' + warn.textContent)
   assert.equal(btn(editor, '写入会话记录').disabled, true, '定位不到就不许写——宁可少个按钮，也不能猜位置')
 })
 
-test('记录读取失败 → 落盘出口禁用', async () => {
-  const { doc, win, flush, msg } = setup()
-  const brokenFetch = () => Promise.resolve({ status: 500, json: () => Promise.resolve({ ok: false, error: 'boom' }) })
-  const mod = loadPlugin(doc, win, brokenFetch)
+test('记录里有正文但这条对不上 → 提示要区分于「记录是空的」', async () => {
+  // 磁盘上只有一段不相干的内容。页面两条、磁盘一条 → 末尾对齐兜底只能
+  // 配上最后一条，第一条仍然对不上（这正是兜底的设计意图）。
+  const { doc, win, flush, conv, fetchImpl } = setup({
+    texts: [
+      '页面上这条完全不在磁盘记录里，长度也够触发识别阈值。',
+      '页面上第二同样不在磁盘记录里，长度也够触发识别阈值。',
+    ],
+    blocks: [{ seq: 1, blockIndex: 0, text: '磁盘上是完全另一段内容，跟页面这两条没有任何关系。' }],
+  })
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  const editor = openEditor(conv.children[0])
+  const warn = editor.querySelector('.rf2-note-warn')
+  assert.ok(warn.textContent.includes('未在会话记录中定位到'), '实际：' + warn.textContent)
+  assert.ok(warn.textContent.includes('记录里有 1 条正文'), '要报出记录规模，便于判断是「没读到」还是「对不上」')
+  assert.equal(btn(editor, '写入会话记录').disabled, true)
+})
+
+test('记录读取失败 → 落盘出口禁用，且把真实错误显示出来', async () => {
+  const { doc, win, flush, msg, fetchImpl } = setup({ readError: 'session log not found' })
+  const mod = loadPlugin(doc, win, fetchImpl)
   mod.apply({ effect: () => {} })
   await tick(); flush()
   const editor = openEditor(msg)
   assert.equal(btn(editor, '写入会话记录').disabled, true)
+  const warn = editor.querySelector('.rf2-note-warn')
+  // 关键：不能把「读失败」和「对不上」混成同一句话——排查时会变成猜谜。
+  assert.ok(warn.textContent.includes('读取会话记录失败'), '实际：' + warn.textContent)
+  assert.ok(warn.textContent.includes('session log not found'), '必须带上真实错误原因')
+})
+
+test('会话 id 取自 DOM 的 data-conversation-session（dsh 的 URL 里没有会话 id）', async () => {
+  // URL 里故意不含任何会话段，只有 DOM 属性有真值
+  const { doc, win, flush, fetchImpl, calls } = setup({ sessionAttr: 'session-dom-abc123', pathname: '/' })
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  const read = calls.find(c => c.url.includes('/session/blocks'))
+  assert.ok(read !== undefined, '必须发起读记录请求')
+  assert.ok(read.url.includes('session-dom-abc123'), '必须用 DOM 上的会话 id；实际 URL：' + read.url)
+})
+
+test('容器未挂载时用占位值不发请求，DOM 出现后自动升级为真实会话 id', async () => {
+  // 首屏：会话容器还没有 data-conversation-session
+  const { doc, win, flush, conv, fetchImpl, calls } = setup({ sessionAttr: null, pathname: '/' })
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  assert.equal(calls.filter(c => c.url.includes('/session/blocks')).length, 0,
+    '会话未知时不该发必然 404 的请求')
+
+  // 宿主把会话容器挂出来，带上真实 id
+  conv.setAttribute('data-conversation-session', 'session-late-777')
+  fireMutations(flush)
+  await tick(); flush()
+
+  const read = calls.find(c => c.url.includes('/session/blocks'))
+  assert.ok(read !== undefined, '识别出会话后必须补拉记录')
+  assert.ok(read.url.includes('session-late-777'), '必须用新识别出的 id；实际：' + read.url)
+  // 定位成功后落盘出口应当可用
+  const editor = openEditor(conv.children[0])
+  assert.equal(Boolean(btn(editor, '写入会话记录').disabled), false, '定位成功就该允许写入')
 })
 
 test('写入会话记录 → POST 载荷正确（seq/blockIndex/expectText/自定义头）且二次确认', async () => {

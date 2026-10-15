@@ -20,7 +20,7 @@ import { CONVERSATION_SELECTOR, TAKEN_ATTR, pickAssistantBlocks, conversationRoo
 import { renderMarkdown } from './markdown.mjs'
 import { classifyNaturalLanguage } from './classify.mjs'
 import {
-  currentSessionId, fingerprint, loadOverrides, setOverride,
+  currentSessionId, isPlaceholderSession, fingerprint, loadOverrides, setOverride,
   removeOverride, clearOverrides, loadPrefs, savePrefs,
 } from './store.mjs'
 import {
@@ -161,9 +161,13 @@ function applyOverride(block, text, prefs, docOverride) {
 
 /**
  * 挂（或重建）操作条。幂等：已存在就清空重建，不产生第二条。
+ *
+ * 传 `getSessionId` 而不是 `sessionId` 值：宿主切会话时不改 URL，我们靠
+ * DOM 属性发现切换，而操作条是**在旧节点上**挂的——若把 id 固定在闭包里，
+ * 切换后点「伪造回复」就会去读/写上一个会话。每次用的时候现取才安全。
  * @returns {HTMLElement} 操作条节点
  */
-function attachBar(block, doc, sessionId, prefs, match) {
+function attachBar(block, doc, getSessionId, prefs, match) {
   let bar = null
   for (const child of (block.children ?? [])) {
     if (child.classList !== undefined && child.classList.contains('rf2-bar')) { bar = child; break }
@@ -175,8 +179,9 @@ function attachBar(block, doc, sessionId, prefs, match) {
   }
   bar.textContent = ''
 
+  const sessionId = getSessionId()
   const fp = taken.get(block)
-  const forgeBtn = makeButton(doc, '伪造回复', '就地编辑这条 AI 回复', () => openBlockEditor(block, sessionId, prefs, doc))
+  const forgeBtn = makeButton(doc, '伪造回复', '就地编辑这条 AI 回复', () => openBlockEditor(block, getSessionId, prefs, doc))
   if (match !== null && match !== undefined) forgeBtn.setAttribute('data-rf2-linked', '')
   bar.append(forgeBtn)
 
@@ -186,7 +191,7 @@ function attachBar(block, doc, sessionId, prefs, match) {
       removeOverride(sessionId, fp)
       block.removeAttribute(EDIT_ATTR)
       applyOverride(block, fpOriginal(block, fp), prefs, doc)
-      attachBar(block, doc, sessionId, prefs, match)
+      attachBar(block, doc, getSessionId, prefs, match)
     }, { 'data-active': true }))
   }
   return bar
@@ -194,9 +199,12 @@ function attachBar(block, doc, sessionId, prefs, match) {
 
 /**
  * 打开编辑器：把一块消息就地换成 textarea，并提供两个保存出口。
+ * 会话 id 在**打开这一刻**解析一次并固定：编辑器是模态的，开着的期间
+ * 用户不会同时切会话。
  */
-function openBlockEditor(block, sessionId, prefs, docOverride) {
+function openBlockEditor(block, getSessionId, prefs, docOverride) {
   closeEditor()
+  const sessionId = getSessionId()
   const doc = docOverride ?? block.ownerDocument ?? document
   const match = blockMatch.get(block) ?? null
 
@@ -248,10 +256,26 @@ function openBlockEditor(block, sessionId, prefs, docOverride) {
 
   // ── 落盘定位状态 ────────────────────────────────────────────────────────
   // 定位不到就不给落盘出口：宁可少一个按钮，也不能猜个位置去写。
+  // 失败原因要分开讲——「记录没读到」「记录是空的」「这条对不上」是三件
+  // 完全不同的事，全都显示同一句话会让排查变成猜谜（踩过）。
   if (match === null) {
-    notes.append(makeNote(doc, 'warn',
-      '⚠ 未在会话记录中定位到这条回复，无法写入记录。'
-      + '若刚发过消息或页面较旧，点「重新读取」后再试。'))
+    const rec = cachedRecord(sessionId)
+    if (isPlaceholderSession(sessionId)) {
+      notes.append(makeNote(doc, 'warn',
+        '⚠ 还没识别出当前会话（会话容器尚未就绪）。稍等片刻，或点「重新读取」。'))
+    } else if (rec === null) {
+      notes.append(makeNote(doc, 'warn', '⚠ 正在读取会话记录…稍后重开本编辑器。'))
+    } else if (rec.error !== null) {
+      notes.append(makeNote(doc, 'warn',
+        '⚠ 读取会话记录失败：' + rec.error + '（点「重新读取」重试）'))
+    } else if (rec.blocks.length === 0) {
+      notes.append(makeNote(doc, 'warn',
+        '⚠ 会话记录里没有可定位的助手正文（这个会话可能还没落盘过）。'))
+    } else {
+      notes.append(makeNote(doc, 'warn',
+        '⚠ 未在会话记录中定位到这条回复（记录里有 ' + rec.blocks.length + ' 条正文，'
+        + '可能是含公式/表格/代码等渲染差异导致对不上）。'))
+    }
   } else if (match.exact !== true) {
     notes.append(makeNote(doc, 'warn',
       '⚠ 与记录中的位置是按顺序推断的（seq=' + match.seq + '），未做内容比对。'
@@ -276,7 +300,7 @@ function openBlockEditor(block, sessionId, prefs, docOverride) {
       removeOverride(sessionId, fp)
       block.removeAttribute(EDIT_ATTR)
       applyOverride(block, fpOriginal(block, fp), prefs, doc)
-      attachBar(block, doc, sessionId, prefs, match)
+      attachBar(block, doc, getSessionId, prefs, match)
     }
     closeEditor()
   }, { 'data-danger': true })
@@ -286,7 +310,7 @@ function openBlockEditor(block, sessionId, prefs, docOverride) {
     const fp = taken.get(block) ?? fingerprint(original)
     setOverride(sessionId, fp, next)
     applyOverride(block, next, prefs, doc)
-    attachBar(block, doc, sessionId, prefs, match)
+    attachBar(block, doc, getSessionId, prefs, match)
     closeEditor()
   })
 
@@ -323,7 +347,7 @@ function openBlockEditor(block, sessionId, prefs, docOverride) {
       // applyOverride 会连编辑器一起清掉，所以顺序是：先换正文、再关编辑器、再重建操作条。
       applyOverride(block, next, prefs, doc)
       closeEditor()
-      attachBar(block, doc, sessionId, prefs, match)
+      attachBar(block, doc, getSessionId, prefs, match)
       // 记录已变，缓存作废，重新读一遍让后续定位对得上。
       resetCache(sessionId)
       loadRecord(sessionId, { force: true }).then(() => scheduleScan()).catch(() => {})
@@ -373,14 +397,30 @@ function confirmWrite(newText) {
   )
 }
 
+/** 两个定位结果是否等价（只比寻址字段，不比正文省内存）。 */
+function sameMatch(a, b) {
+  if (a === b) return true
+  if (a === null || b === null || a === undefined || b === undefined) return false
+  return a.seq === b.seq && a.blockIndex === b.blockIndex && a.exact === b.exact
+}
+
 /**
  * 接管一个消息节点：挂操作条 + 应用已有覆盖。
  */
-function takeBlock(block, sessionId, overrides, prefs, docOverride, dup = 1, match = null) {
-  if (block.hasAttribute(TAKEN_ATTR)) return
+function takeBlock(block, getSessionId, overrides, prefs, docOverride, dup = 1, match = null) {
   // 文档对象由扫描器显式传入：ownerDocument 在合成节点上可能缺失，
   // 隐式全局 document 在打包后的模块作用域里也未必可见。
   const doc = docOverride ?? block.ownerDocument ?? document
+
+  // 已接管：**定位结果必须刷新**。会话记录是异步后到的（首屏扫描往往还没
+  // 拉到），若不刷新，块会永远停留在接管那一刻的 match=null 上——
+  // 表现就是「每条回复都定位不到，落盘出口全程禁用」。踩过。
+  if (block.hasAttribute(TAKEN_ATTR)) {
+    if (sameMatch(blockMatch.get(block) ?? null, match ?? null)) return
+    blockMatch.set(block, match)
+    attachBar(block, doc, getSessionId, prefs, match)
+    return
+  }
 
   const original = ownText(block)
   const fp = fingerprint(original)
@@ -395,24 +435,31 @@ function takeBlock(block, sessionId, overrides, prefs, docOverride, dup = 1, mat
   // 而 .rf2-host 的 position:relative 对宿主布局无影响。
   block.classList.add('rf2-host')
 
-  attachBar(block, doc, sessionId, prefs, match)
+  attachBar(block, doc, getSessionId, prefs, match)
   const override = overrides[fp]
   if (override !== undefined && typeof override.text === 'string') {
     applyOverride(block, override.text, prefs, doc)
-    attachBar(block, doc, sessionId, prefs, match)
+    attachBar(block, doc, getSessionId, prefs, match)
   }
 }
 
 /** 一轮扫描：接管当前所有助手消息块，并刷新落盘定位。 */
-function scan(sessionId, prefs, docOverride) {
+function scan(getSessionId, prefs, docOverride) {
   // 全局开关：停用时不提供任何编辑入口（setEnabled(false) 的实时效果）。
   if (prefs.enabled === false) return
   const doc = docOverride ?? document
   const root = conversationRoot(doc)
   if (root === null) return
+  const sessionId = getSessionId()
   const overrides = loadOverrides(sessionId)
   // 只接管纯自然语言块，工具调用/结构化动作不提供编辑入口。
-  const blocks = pickAssistantBlocks(root, classifyNaturalLanguage)
+  //
+  // 必须 includeTaken：已接管的块也要枚举回来。不是为了重挂操作条
+  // （takeBlock 会早退），而是为了**刷新落盘定位**——会话记录是异步
+  // 后到的，首屏扫描时块已经以 match=null 接管完；若此后扫描把已接管块
+  // 全跳过，定位就永远停在 null，表现是「每条回复都定位不到、落盘出口
+  // 全程禁用」。踩过。
+  const blocks = pickAssistantBlocks(root, classifyNaturalLanguage, { includeTaken: true })
 
   // 指纹重数统计：先数重再接管，编辑器里对重名者给出警示。
   const texts = blocks.map(ownText)
@@ -433,7 +480,7 @@ function scan(sessionId, prefs, docOverride) {
 
   blocks.forEach((block, i) => {
     try {
-      takeBlock(block, sessionId, overrides, prefs, doc, counts.get(fps.get(block)) ?? 1, matches[i] ?? null)
+      takeBlock(block, getSessionId, overrides, prefs, doc, counts.get(fps.get(block)) ?? 1, matches[i] ?? null)
     } catch (error) {
       log('接管消息块失败', error)
     }
@@ -455,7 +502,9 @@ export function apply(ctx) {
   document.head.append(styleEl)
 
   let prefs = loadPrefs()
-  let sessionId = currentSessionId()
+  let sessionId = currentSessionId(document)
+  /** 会话 id 取「用的时候现读」，不要把它固定进闭包（见 attachBar 注释）。 */
+  const getSessionId = () => sessionId
 
   /** 扫描节流：流式输出期间宿主高频重渲染，按帧合并。 */
   let timer = null
@@ -463,29 +512,41 @@ export function apply(ctx) {
     if (timer !== null) return
     timer = window.setTimeout(() => {
       timer = null
-      try { scan(sessionId, prefs, document) } catch (error) { log('扫描失败', error) }
+      try { runScan() } catch (error) { log('扫描失败', error) }
     }, SCAN_DEBOUNCE_MS)
   }
 
   /** 拉一次落盘记录，拿到后重扫以便刷新定位。 */
   const syncRecord = () => {
+    // 还没识别出会话时不发请求：路由必然 404，只会刷一屏没用的噪音。
+    if (isPlaceholderSession(sessionId)) return
     loadRecord(sessionId)
       .then(() => scheduleScan())
       .catch(error => log('读取会话记录失败', error))
   }
 
-  // 会话切换（SPA 路由变化）后重算会话 id 并清空编辑态
-  const syncSession = () => {
-    const next = currentSessionId()
-    if (next === sessionId) return
-    sessionId = next
-    closeEditor()
-    scheduleScan()
-    syncRecord()
+  /**
+   * 每轮扫描都重算会话 id。
+   *
+   * 为什么不能只在 popstate/hashchange 上挂：dsh 是单页应用，切换会话
+   * **不触发任何 URL 事件**（实测 @deepseek-ai/dsh-client-ui-conversation
+   * 的 client.js 里 location/history 一次都没出现）。会话 id 只体现在
+   * DOM 属性 `data-conversation-session` 上。首屏同理——容器挂载前拿到
+   * 的是占位值，挂载后才变成真值，所以必须每轮都重算。
+   */
+  const runScan = () => {
+    const next = currentSessionId(document)
+    if (next !== sessionId) {
+      // 会话真的变了（首屏就绪 / 切到别的会话）：关掉编辑态、重新拉记录。
+      if (isPlaceholderSession(sessionId) === false) closeEditor()
+      sessionId = next
+      syncRecord()
+    }
+    scan(getSessionId, prefs, document)
   }
 
-  window.addEventListener('popstate', syncSession)
-  window.addEventListener('hashchange', syncSession)
+  window.addEventListener('popstate', scheduleScan)
+  window.addEventListener('hashchange', scheduleScan)
 
   // 宿主 DOM 变化驱动接管：会话区子树内的节点增删（新消息、流式定稿、
   // 标签切换重渲染）都会触发。作用域限定在会话锚点内，避免观察整棵树。
@@ -526,7 +587,7 @@ export function apply(ctx) {
     const last = blocks[blocks.length - 1]
     if (last === undefined) return
     event.preventDefault()
-    openBlockEditor(last, sessionId, prefs, document)
+    openBlockEditor(last, getSessionId, prefs, document)
   }
   window.addEventListener('keydown', onKey)
 
@@ -534,8 +595,8 @@ export function apply(ctx) {
     window.clearInterval(bootstrap)
     if (timer !== null) window.clearTimeout(timer)
     if (observer !== null) observer.disconnect()
-    window.removeEventListener('popstate', syncSession)
-    window.removeEventListener('hashchange', syncSession)
+    window.removeEventListener('popstate', scheduleScan)
+    window.removeEventListener('hashchange', scheduleScan)
     window.removeEventListener('keydown', onKey)
     stripInjectedUI()
     styleEl.remove()
@@ -546,16 +607,25 @@ export function apply(ctx) {
     window.__dshReplyForgeV2 = {
       version: '2.0.0',
       sessionId() { return sessionId },
+      /** 直接从 DOM 现读一次（排查「id 认错了」时对比用）。 */
+      domSessionId() { return currentSessionId(document) },
       clearAll() {
         clearOverrides(sessionId)
         log('已清空当前会话的本机覆盖')
       },
-      /** 强制重读会话落盘记录（定位不上的时候用）。 */
+      /**
+       * 强制重算会话 id + 重读落盘记录（定位不上的时候用）。
+       * 会顺带修掉「id 还是首屏占位值」这种状态。
+       */
       refresh() {
+        sessionId = currentSessionId(document)
         resetCache(sessionId)
+        if (isPlaceholderSession(sessionId)) {
+          return Promise.resolve({ ok: false, sessionId, error: '未识别出当前会话（DOM 里没有 data-conversation-session）' })
+        }
         return loadRecord(sessionId, { force: true }).then(rec => {
           scheduleScan()
-          return { ok: rec.error === null, blocks: rec.blocks.length, error: rec.error }
+          return { ok: rec.error === null, sessionId, blocks: rec.blocks.length, error: rec.error }
         })
       },
       /** 当前页面上各块的落盘定位情况，用于排查「为什么写不了」。 */
@@ -564,13 +634,14 @@ export function apply(ctx) {
         // includeTaken：枚举用途，已接管的块也要算进来（否则全接管完就是空列表）。
         const blocks = pickAssistantBlocks(root, classifyNaturalLanguage, { includeTaken: true })
         const rec = cachedRecord(sessionId)
-        if (rec === null) return { ok: false, error: '记录未加载' }
-        if (rec.error !== null) return { ok: false, error: rec.error }
+        const head = { sessionId, domSessionId: currentSessionId(document), domBlocks: blocks.length }
+        if (rec === null) return { ...head, ok: false, error: '记录未加载' }
+        if (rec.error !== null) return { ...head, ok: false, error: rec.error }
         const matches = matchBlocks(rec.blocks, blocks.map(ownText))
         return {
+          ...head,
           ok: true,
           diskBlocks: rec.blocks.length,
-          domBlocks: blocks.length,
           matched: matches.filter(m => m !== null).length,
           exact: matches.filter(m => m !== null && m.exact === true).length,
           rows: matches.map((m, i) => ({

@@ -623,16 +623,42 @@ var __mly_forge_v2__dsh_plugin_client_store_mjs = (function(){
 const PREFIX = 'dsh-reply-forge-v2:'
 
 
-function currentSessionId() {
+const PLACEHOLDER_SESSION = '_global'
+
+
+function isPlaceholderSession(sessionId) {
+  return typeof sessionId !== 'string' || sessionId === '' || sessionId === PLACEHOLDER_SESSION
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function currentSessionId(doc) {
   try {
+    const d = doc ?? (typeof document === 'undefined' ? null : document)
+    const el = d?.querySelector?.('[data-conversation-session]')
+    const domId = el?.getAttribute?.('data-conversation-session')
+    if (typeof domId === 'string' && domId !== '') return domId
+    
     const path = window.location.pathname ?? ''
     const hit = /(?:^|\/)s(?:ession)?\/([A-Za-z0-9_-]+)/.exec(path)
     if (hit !== null && hit[1] !== undefined) return hit[1]
     const hash = window.location.hash ?? ''
     const hit2 = /(?:^|\/)s(?:ession)?\/([A-Za-z0-9_-]+)/.exec(hash)
-    return hit2 !== null && hit2[1] !== undefined ? hit2[1] : '_global'
+    return hit2 !== null && hit2[1] !== undefined ? hit2[1] : PLACEHOLDER_SESSION
   } catch {
-    return '_global'
+    return PLACEHOLDER_SESSION
   }
 }
 
@@ -729,8 +755,9 @@ function savePrefs(prefs) {
   }
 }
 
- return { currentSessionId: currentSessionId, fingerprint: fingerprint, loadOverrides: loadOverrides, setOverride: setOverride, removeOverride: removeOverride, clearOverrides: clearOverrides, loadPrefs: loadPrefs, savePrefs: savePrefs } })();
+ return { isPlaceholderSession: isPlaceholderSession, currentSessionId: currentSessionId, fingerprint: fingerprint, loadOverrides: loadOverrides, setOverride: setOverride, removeOverride: removeOverride, clearOverrides: clearOverrides, loadPrefs: loadPrefs, savePrefs: savePrefs, PLACEHOLDER_SESSION: PLACEHOLDER_SESSION } })();
 var currentSessionId = __mly_forge_v2__dsh_plugin_client_store_mjs.currentSessionId;
+var isPlaceholderSession = __mly_forge_v2__dsh_plugin_client_store_mjs.isPlaceholderSession;
 var fingerprint = __mly_forge_v2__dsh_plugin_client_store_mjs.fingerprint;
 var loadOverrides = __mly_forge_v2__dsh_plugin_client_store_mjs.loadOverrides;
 var setOverride = __mly_forge_v2__dsh_plugin_client_store_mjs.setOverride;
@@ -1044,7 +1071,11 @@ function applyOverride(block, text, prefs, docOverride) {
 
 
 
-function attachBar(block, doc, sessionId, prefs, match) {
+
+
+
+
+function attachBar(block, doc, getSessionId, prefs, match) {
   let bar = null
   for (const child of (block.children ?? [])) {
     if (child.classList !== undefined && child.classList.contains('rf2-bar')) { bar = child; break }
@@ -1056,8 +1087,9 @@ function attachBar(block, doc, sessionId, prefs, match) {
   }
   bar.textContent = ''
 
+  const sessionId = getSessionId()
   const fp = taken.get(block)
-  const forgeBtn = makeButton(doc, '伪造回复', '就地编辑这条 AI 回复', () => openBlockEditor(block, sessionId, prefs, doc))
+  const forgeBtn = makeButton(doc, '伪造回复', '就地编辑这条 AI 回复', () => openBlockEditor(block, getSessionId, prefs, doc))
   if (match !== null && match !== undefined) forgeBtn.setAttribute('data-rf2-linked', '')
   bar.append(forgeBtn)
 
@@ -1067,7 +1099,7 @@ function attachBar(block, doc, sessionId, prefs, match) {
       removeOverride(sessionId, fp)
       block.removeAttribute(EDIT_ATTR)
       applyOverride(block, fpOriginal(block, fp), prefs, doc)
-      attachBar(block, doc, sessionId, prefs, match)
+      attachBar(block, doc, getSessionId, prefs, match)
     }, { 'data-active': true }))
   }
   return bar
@@ -1076,8 +1108,11 @@ function attachBar(block, doc, sessionId, prefs, match) {
 
 
 
-function openBlockEditor(block, sessionId, prefs, docOverride) {
+
+
+function openBlockEditor(block, getSessionId, prefs, docOverride) {
   closeEditor()
+  const sessionId = getSessionId()
   const doc = docOverride ?? block.ownerDocument ?? document
   const match = blockMatch.get(block) ?? null
 
@@ -1129,10 +1164,26 @@ function openBlockEditor(block, sessionId, prefs, docOverride) {
 
   
   
+  
+  
   if (match === null) {
-    notes.append(makeNote(doc, 'warn',
-      '⚠ 未在会话记录中定位到这条回复，无法写入记录。'
-      + '若刚发过消息或页面较旧，点「重新读取」后再试。'))
+    const rec = cachedRecord(sessionId)
+    if (isPlaceholderSession(sessionId)) {
+      notes.append(makeNote(doc, 'warn',
+        '⚠ 还没识别出当前会话（会话容器尚未就绪）。稍等片刻，或点「重新读取」。'))
+    } else if (rec === null) {
+      notes.append(makeNote(doc, 'warn', '⚠ 正在读取会话记录…稍后重开本编辑器。'))
+    } else if (rec.error !== null) {
+      notes.append(makeNote(doc, 'warn',
+        '⚠ 读取会话记录失败：' + rec.error + '（点「重新读取」重试）'))
+    } else if (rec.blocks.length === 0) {
+      notes.append(makeNote(doc, 'warn',
+        '⚠ 会话记录里没有可定位的助手正文（这个会话可能还没落盘过）。'))
+    } else {
+      notes.append(makeNote(doc, 'warn',
+        '⚠ 未在会话记录中定位到这条回复（记录里有 ' + rec.blocks.length + ' 条正文，'
+        + '可能是含公式/表格/代码等渲染差异导致对不上）。'))
+    }
   } else if (match.exact !== true) {
     notes.append(makeNote(doc, 'warn',
       '⚠ 与记录中的位置是按顺序推断的（seq=' + match.seq + '），未做内容比对。'
@@ -1157,7 +1208,7 @@ function openBlockEditor(block, sessionId, prefs, docOverride) {
       removeOverride(sessionId, fp)
       block.removeAttribute(EDIT_ATTR)
       applyOverride(block, fpOriginal(block, fp), prefs, doc)
-      attachBar(block, doc, sessionId, prefs, match)
+      attachBar(block, doc, getSessionId, prefs, match)
     }
     closeEditor()
   }, { 'data-danger': true })
@@ -1167,7 +1218,7 @@ function openBlockEditor(block, sessionId, prefs, docOverride) {
     const fp = taken.get(block) ?? fingerprint(original)
     setOverride(sessionId, fp, next)
     applyOverride(block, next, prefs, doc)
-    attachBar(block, doc, sessionId, prefs, match)
+    attachBar(block, doc, getSessionId, prefs, match)
     closeEditor()
   })
 
@@ -1204,7 +1255,7 @@ function openBlockEditor(block, sessionId, prefs, docOverride) {
       
       applyOverride(block, next, prefs, doc)
       closeEditor()
-      attachBar(block, doc, sessionId, prefs, match)
+      attachBar(block, doc, getSessionId, prefs, match)
       
       resetCache(sessionId)
       loadRecord(sessionId, { force: true }).then(() => scheduleScan()).catch(() => {})
@@ -1255,13 +1306,29 @@ function confirmWrite(newText) {
 }
 
 
+function sameMatch(a, b) {
+  if (a === b) return true
+  if (a === null || b === null || a === undefined || b === undefined) return false
+  return a.seq === b.seq && a.blockIndex === b.blockIndex && a.exact === b.exact
+}
 
 
-function takeBlock(block, sessionId, overrides, prefs, docOverride, dup = 1, match = null) {
-  if (block.hasAttribute(TAKEN_ATTR)) return
+
+
+function takeBlock(block, getSessionId, overrides, prefs, docOverride, dup = 1, match = null) {
   
   
   const doc = docOverride ?? block.ownerDocument ?? document
+
+  
+  
+  
+  if (block.hasAttribute(TAKEN_ATTR)) {
+    if (sameMatch(blockMatch.get(block) ?? null, match ?? null)) return
+    blockMatch.set(block, match)
+    attachBar(block, doc, getSessionId, prefs, match)
+    return
+  }
 
   const original = ownText(block)
   const fp = fingerprint(original)
@@ -1276,24 +1343,31 @@ function takeBlock(block, sessionId, overrides, prefs, docOverride, dup = 1, mat
   
   block.classList.add('rf2-host')
 
-  attachBar(block, doc, sessionId, prefs, match)
+  attachBar(block, doc, getSessionId, prefs, match)
   const override = overrides[fp]
   if (override !== undefined && typeof override.text === 'string') {
     applyOverride(block, override.text, prefs, doc)
-    attachBar(block, doc, sessionId, prefs, match)
+    attachBar(block, doc, getSessionId, prefs, match)
   }
 }
 
 
-function scan(sessionId, prefs, docOverride) {
+function scan(getSessionId, prefs, docOverride) {
   
   if (prefs.enabled === false) return
   const doc = docOverride ?? document
   const root = conversationRoot(doc)
   if (root === null) return
+  const sessionId = getSessionId()
   const overrides = loadOverrides(sessionId)
   
-  const blocks = pickAssistantBlocks(root, classifyNaturalLanguage)
+  
+  
+  
+  
+  
+  
+  const blocks = pickAssistantBlocks(root, classifyNaturalLanguage, { includeTaken: true })
 
   
   const texts = blocks.map(ownText)
@@ -1314,7 +1388,7 @@ function scan(sessionId, prefs, docOverride) {
 
   blocks.forEach((block, i) => {
     try {
-      takeBlock(block, sessionId, overrides, prefs, doc, counts.get(fps.get(block)) ?? 1, matches[i] ?? null)
+      takeBlock(block, getSessionId, overrides, prefs, doc, counts.get(fps.get(block)) ?? 1, matches[i] ?? null)
     } catch (error) {
       log('接管消息块失败', error)
     }
@@ -1336,7 +1410,9 @@ function apply(ctx) {
   document.head.append(styleEl)
 
   let prefs = loadPrefs()
-  let sessionId = currentSessionId()
+  let sessionId = currentSessionId(document)
+  
+  const getSessionId = () => sessionId
 
   
   let timer = null
@@ -1344,29 +1420,41 @@ function apply(ctx) {
     if (timer !== null) return
     timer = window.setTimeout(() => {
       timer = null
-      try { scan(sessionId, prefs, document) } catch (error) { log('扫描失败', error) }
+      try { runScan() } catch (error) { log('扫描失败', error) }
     }, SCAN_DEBOUNCE_MS)
   }
 
   
   const syncRecord = () => {
+    
+    if (isPlaceholderSession(sessionId)) return
     loadRecord(sessionId)
       .then(() => scheduleScan())
       .catch(error => log('读取会话记录失败', error))
   }
 
   
-  const syncSession = () => {
-    const next = currentSessionId()
-    if (next === sessionId) return
-    sessionId = next
-    closeEditor()
-    scheduleScan()
-    syncRecord()
+
+
+
+
+
+
+
+
+  const runScan = () => {
+    const next = currentSessionId(document)
+    if (next !== sessionId) {
+      
+      if (isPlaceholderSession(sessionId) === false) closeEditor()
+      sessionId = next
+      syncRecord()
+    }
+    scan(getSessionId, prefs, document)
   }
 
-  window.addEventListener('popstate', syncSession)
-  window.addEventListener('hashchange', syncSession)
+  window.addEventListener('popstate', scheduleScan)
+  window.addEventListener('hashchange', scheduleScan)
 
   
   
@@ -1407,7 +1495,7 @@ function apply(ctx) {
     const last = blocks[blocks.length - 1]
     if (last === undefined) return
     event.preventDefault()
-    openBlockEditor(last, sessionId, prefs, document)
+    openBlockEditor(last, getSessionId, prefs, document)
   }
   window.addEventListener('keydown', onKey)
 
@@ -1415,8 +1503,8 @@ function apply(ctx) {
     window.clearInterval(bootstrap)
     if (timer !== null) window.clearTimeout(timer)
     if (observer !== null) observer.disconnect()
-    window.removeEventListener('popstate', syncSession)
-    window.removeEventListener('hashchange', syncSession)
+    window.removeEventListener('popstate', scheduleScan)
+    window.removeEventListener('hashchange', scheduleScan)
     window.removeEventListener('keydown', onKey)
     stripInjectedUI()
     styleEl.remove()
@@ -1427,16 +1515,25 @@ function apply(ctx) {
     window.__dshReplyForgeV2 = {
       version: '2.0.0',
       sessionId() { return sessionId },
+      
+      domSessionId() { return currentSessionId(document) },
       clearAll() {
         clearOverrides(sessionId)
         log('已清空当前会话的本机覆盖')
       },
       
+
+
+
       refresh() {
+        sessionId = currentSessionId(document)
         resetCache(sessionId)
+        if (isPlaceholderSession(sessionId)) {
+          return Promise.resolve({ ok: false, sessionId, error: '未识别出当前会话（DOM 里没有 data-conversation-session）' })
+        }
         return loadRecord(sessionId, { force: true }).then(rec => {
           scheduleScan()
-          return { ok: rec.error === null, blocks: rec.blocks.length, error: rec.error }
+          return { ok: rec.error === null, sessionId, blocks: rec.blocks.length, error: rec.error }
         })
       },
       
@@ -1445,13 +1542,14 @@ function apply(ctx) {
         
         const blocks = pickAssistantBlocks(root, classifyNaturalLanguage, { includeTaken: true })
         const rec = cachedRecord(sessionId)
-        if (rec === null) return { ok: false, error: '记录未加载' }
-        if (rec.error !== null) return { ok: false, error: rec.error }
+        const head = { sessionId, domSessionId: currentSessionId(document), domBlocks: blocks.length }
+        if (rec === null) return { ...head, ok: false, error: '记录未加载' }
+        if (rec.error !== null) return { ...head, ok: false, error: rec.error }
         const matches = matchBlocks(rec.blocks, blocks.map(ownText))
         return {
+          ...head,
           ok: true,
           diskBlocks: rec.blocks.length,
-          domBlocks: blocks.length,
           matched: matches.filter(m => m !== null).length,
           exact: matches.filter(m => m !== null && m.exact === true).length,
           rows: matches.map((m, i) => ({

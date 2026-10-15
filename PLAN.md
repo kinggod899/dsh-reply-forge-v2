@@ -323,6 +323,67 @@ E:\文档\dsh-reply-forge-v2`），此时相对路径仍落在同一棵目录树
 | `client` | 18 | 走构建产物 `client.js`：操作条、编辑器双出口、二次确认、陈旧提示、快捷键、调试命名空间 |
 | `routes` | 15 | 两条路由：目录穿越、缺头 403、缺参 400、超长 413、正常写入、陈旧拒绝、越界拒绝 |
 
+### 9.7 真机验证暴露的两个 bug：会话 id 从哪来（2026-10-15 晚）
+
+v2.2 装进 desktop profile 后用户实测：**每条回复都提示「未在会话记录中定位到
+这条回复，无法写入记录」，只有 `仅本机渲染` 能用。** 排查出两个 bug，都指向
+同一个根源：**会话 id 是猜来的**。
+
+#### Bug 1：`currentSessionId()` 解析的是 URL，而 dsh 的 URL 里没有会话 id
+
+原实现靠正则从 `window.location.pathname` 里抠 `/session/<id>`。查了宿主的
+`@deepseek-ai/dsh-client-ui-conversation/lib/client.js`（716 KB）：
+`location` / `history` / `pushState` / `hashchange` **一次都没出现**——dsh 是
+单页应用，切换会话只改内存状态，不碰 URL。所以 `currentSessionId()` 永远返回
+`_global`，读路由拿它去查文件必然 404，`blocks` 为空，于是**每一条都定位不到**。
+
+v1 为什么没暴露：它只用这个 id 给 localStorage 分桶，`_global` 也能凑合
+（所有会话共用一个桶，只是覆盖会串——v1 已知的「重名共享」现象）。
+v2 要拿 id 去查会话文件，必须拿到真值。
+
+**正解**：宿主把当前会话 id 渲染在 DOM 上——
+```js
+"data-conversation-session": sessionId   // client.js:16333
+```
+挂在带 `data-conversation-region="chat"` 的容器上。所以 `currentSessionId()`
+改为**先查 DOM**，URL 只作兜底。
+
+#### Bug 2：会话记录后到，而 `scan()` 跳过已接管块，定位永不刷新
+
+`takeBlock()` 对已接管块直接 `return`；而 `scan()` 调
+`pickAssistantBlocks()` 时**没传 `includeTaken`**，于是已接管块被整个跳过——
+第二轮扫描枚举到 0 个块，`blockMatch` 永远停在上一次的值上。
+
+时序上必然踩雷：首屏扫描时记录请求还没回来 → 块以 `match=null` 接管完 →
+记录到达 → 重新扫描 → 已接管的块全被跳过 → **定位永远停在 null**。
+
+这两个 bug 叠加，正好就是用户看到的现象。修法：
+
+1. `currentSessionId(doc)` 先读 `[data-conversation-session]`；
+2. `scan()` 改用 `{ includeTaken: true }` 枚举，`takeBlock()` 对已接管块
+   **仍然刷新定位**（`blockMatch` + 重建操作条），并用 `sameMatch()` 判断
+   是否需要动手，保持幂等；
+3. `runScan()` 每轮重算会话 id（切会话不触发任何 URL 事件，必须靠 DOM）；
+4. 会话 id 改成「用的时候现取」：操作条/编辑器传 `getSessionId` 而不是值，
+   避免切会话后点按钮去读写上一个会话；
+5. 占位 id 不发请求（必然 404，只会刷噪音）；
+6. 编辑器把**失败原因分开讲**：`会话未识别` / `正在读取` / `读取失败(带原因)` /
+   `记录为空` / `这条对不上(带记录规模)`。原来五者共用一句话，是排查困难的
+   直接原因。
+
+真机数据验证（session-7c5ee6b6，1145 事件 / 30 个正文块）：读路由 200、
+两种 id 写法（裸 uuid / `session-` 前缀）都命中、**30 个块全部可寻址**
+（18 精确 + 12 顺序推断兜底，0 个对不上）。
+
+| 测试 | 覆盖 |
+|---|---|
+| `会话 id 取自 DOM 的 data-conversation-session` | bug 1 主来源 |
+| `容器未挂载时用占位值不发请求，DOM 出现后自动升级` | 首屏时序 + bug 2 |
+| `记录里有正文但这条对不上` | 五种失败原因的正确分支（兜底只配尾部） |
+| `记录读取失败 → 把真实错误显示出来` | 失败原因可诊断 |
+
+→ **测试 69/69**（client 18 → 21）。
+
 合计 **66/66**。`client.test.mjs` 与 `routes.test.mjs` 是 v2.2 新增；
 `routes.test.mjs` 直接调 route handler（`DSH_HOME` 指临时目录），走真实文件系统。
 

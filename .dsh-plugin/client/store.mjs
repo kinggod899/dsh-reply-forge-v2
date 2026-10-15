@@ -6,17 +6,43 @@
 
 const PREFIX = 'dsh-reply-forge-v2:'
 
-/** 会话 id 探测：URL 里的 session 段是当前宿主路由的实际形状。 */
-export function currentSessionId() {
+/** 会话 id 占位值：DOM 还没挂载出会话容器、URL 里也没有 id 时用它。 */
+export const PLACEHOLDER_SESSION = '_global'
+
+/** 是否拿到了真实会话 id（占位值不能拿去查会话文件）。 */
+export function isPlaceholderSession(sessionId) {
+  return typeof sessionId !== 'string' || sessionId === '' || sessionId === PLACEHOLDER_SESSION
+}
+
+/**
+ * 当前会话 id。
+ *
+ * **主来源是 DOM，不是 URL。** dsh 是单页应用：切换会话只改内存状态，
+ * 不碰 location/history（实测 @deepseek-ai/dsh-client-ui-conversation 的
+ * client.js 里 location/history 一次都没出现）。宿主把当前会话 id 渲染在
+ * 会话容器上：
+ *     <div data-conversation-content data-conversation-session="session-…"
+ *          data-conversation-region="chat">
+ * 所以解析 URL 只能拿到占位值 —— v1 只用它给 localStorage 分桶，
+ * `_global` 也能凑合；v2 要拿它去查会话文件，必须拿到真值。
+ *
+ * @param {Document} [doc] 便于测试注入；缺省用全局 document
+ */
+export function currentSessionId(doc) {
   try {
+    const d = doc ?? (typeof document === 'undefined' ? null : document)
+    const el = d?.querySelector?.('[data-conversation-session]')
+    const domId = el?.getAttribute?.('data-conversation-session')
+    if (typeof domId === 'string' && domId !== '') return domId
+    // 兜底：老版本 / 其它宿主形态把 id 放在路径里。
     const path = window.location.pathname ?? ''
     const hit = /(?:^|\/)s(?:ession)?\/([A-Za-z0-9_-]+)/.exec(path)
     if (hit !== null && hit[1] !== undefined) return hit[1]
     const hash = window.location.hash ?? ''
     const hit2 = /(?:^|\/)s(?:ession)?\/([A-Za-z0-9_-]+)/.exec(hash)
-    return hit2 !== null && hit2[1] !== undefined ? hit2[1] : '_global'
+    return hit2 !== null && hit2[1] !== undefined ? hit2[1] : PLACEHOLDER_SESSION
   } catch {
-    return '_global'
+    return PLACEHOLDER_SESSION
   }
 }
 

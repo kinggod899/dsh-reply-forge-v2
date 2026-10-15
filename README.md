@@ -46,7 +46,8 @@ DSH 桌面端插件 v2：**真伪造**——改写的 AI 回复进入会话落�
 - `.dsh-plugin/server/routes.mjs` —— 两条 HTTP 路由：读块列表 / 执行写入。
   写路由带自定义头校验、参数校验、超长拒绝，业务失败一律 200 + `ok:false`；
 - `.dsh-plugin/client/index.mjs` —— client half：在每条助手回复下挂操作条，
-  就地编辑器双出口（`仅本机渲染` / `写入会话记录`）；
+  就地编辑器双出口（`仅本机渲染` / `写入会话记录`）。会话 id 取自宿主渲染的
+  `data-conversation-session` 属性——dsh 的 URL 里没有会话 id（见 PLAN §9.7）；
 - `.dsh-plugin/client/record.mjs` —— 磁盘记录访问层 + DOM↔磁盘两级匹配；
 - `.dsh-plugin/client/{picker,markdown,classify,store,styles}.mjs` ——
   从 v1 移植的 UI 模块（前缀全部改为 `rf2-`，与 v1 严格隔离）；
@@ -67,8 +68,8 @@ DSH 桌面端插件 v2：**真伪造**——改写的 AI 回复进入会话落�
   回答「这个会话还能不能继续对话」；
 - `scripts/frame-anatomy.mjs` —— 帧结构解剖辅助工具。
 
-测试 **66/66**：`session-log` 11 + `session-write` 15 + `session-anatomy` 7 +
-`client` 18 + `routes` 15。跑法：
+测试 **69/69**：`session-log` 11 + `session-write` 15 + `session-anatomy` 7 +
+`client` 21 + `routes` 15。跑法：
 
 ```bash
 for f in tests/*.test.mjs; do node "$f"; done
