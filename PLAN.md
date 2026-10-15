@@ -134,3 +134,61 @@ reasoning/thinking 块的 signature」= 过校验。
 
 尚未覆盖（v2.0 剩余验收项）：真机重启 dsh 打开会话，确认**模型侧**采信
 （伪造正文进入下一轮请求上下文）并能继续对话。
+
+> 注：上面第 2 条「`bareModuleBaseUrl` 指向 dsh 安装目录」是 **slim host 的
+> 权宜做法**。App 的真实做法根本不传这个参数——见 §7，它靠
+> `PluginPackages + createRuntimeResolution` 做双锚点解析。
+
+## 7. 实证记录：provider 预言机与 13 渠道故障（2026-10-15）
+
+`scripts/provider-oracle.mjs`：照抄 App 的真实启动配方
+（`@deepseek-ai/dsh/lib/profile-boot-*.js` 的 `runProfile`）无头起**完整
+desktop profile**，然后直连 RPC 读出 dsh 注册了哪些 provider。
+
+### 7.1 真实启动配方（三个必踩点）
+
+1. `ctx.baseUrl` 来自**配置文件所在目录**。把 leaf 写进 `tmp/` 会让裸包名
+   `dsh-our-free-model` 解析不到 → `failed to import`（**假故障**，会误导
+   成插件坏了）。正解：`rootConfig = <profile>/cordis.yml`（内容就是 `[]`）。
+2. 双锚点解析**不是** `boot()` 的参数，而是 prepare 里挂的
+   `hostCtx.plugin(PluginPackages, { resolution: await createRuntimeResolution({ installAnchor, profile }) })`。
+   实测 `resolution` = 692 条（installation 511 + profile 181）。
+3. 必须先 `hostCtx.provide('profileContext', …)`，否则 `readProfilePatches`
+   原样返回裸包名，且 `dsh-base` 里 `disabled: !!js "!ctx.get('profileContext')"`
+   的 desktop 专属条目会被整片关掉。
+
+### 7.2 故障定位链（NO_ADAPTER → 13 渠道无模型）
+
+| 观察 | 结论 |
+|---|---|
+| `~/.dsh/profiles/desktop/.plugin-manager/logs/operation-akP2dq/pnpm.log` 15:20:51 `ERR_PNPM_EPERM` | 插件包目录被 pnpm 的失败 rename 清掉 |
+| 无头起 profile → `our-free-model: failed to import`（早期误判） | **假象**：leaf 在 tmp，见 7.1-1 |
+| 用真实配方后 `llm/listProviders` = 17 个 | 13 渠道 provider **全部注册**（codearts/buddy/workbuddy/lobsterai/qoder/qodercn/trae/cline/loomy/raccoon/minimax/gemini/zcode） |
+| 但 `session/modelCatalog` 只有 4 组 | `buildModelCatalog` 会丢掉 `models.length === 0` 的 provider |
+| `credentials.resolve(ref)` 13/13 OK | 凭据链路正常，不是登录问题 |
+| pack.js `listModels` 首行 `providerCatalogVisible(...)` | 闸门：`accountPool.hasLoggedInAccount(provider)` |
+| `settings.register` 存在 → pack 走 SettingsStore（命名空间空）→ accounts=0 | 账号池读到 0 个账号 → 13 渠道全部 `listModels → []` |
+| 强制回落 FileStore（读 `~/.dsh/channel-pack/state.json`，13 账号） | **17 个 provider 全部带模型**：workbuddy 29 / buddy 18 / trae 38 / cline 484 / lobsterai 30 / qoder 17 / qodercn 14 / codearts 8 / loomy 10 / raccoon 6 / minimax 4 / zcode 2 / gemini 1 |
+
+结论：**13 渠道的可用性完全取决于账号池能否读到 `~/.dsh/channel-pack/state.json`**；
+包目录补回后插件宿主半身、渠道包（`channels: ready`）、13 个适配器、13 份凭据
+全部正常。App 侧 15:15 重登时写过 `state.json`（mtime 15:15），证明真实 App 走的是
+FileStore 分支。
+
+### 7.3 顺带查明的两件事
+
+- `settings.json` 里的 `hideChannelModels` 是**孤儿键**：v2.1.0 的
+  `index.js`/`client.js`/`pack.js` 都不读它；真正的开关是环境变量
+  `DSH_HIDE_MODELS_WITHOUT_ACCOUNT`（默认开，即「无账号就隐藏模型」）。
+- 4 个账号 token 已过期（codearts / gemini / minimax / cline，均为
+  `refreshable: true`，按需续期）；cline 今日 3 次调用全部报错。
+
+### 7.4 复现命令
+
+```bash
+node scripts/provider-oracle.mjs --port 3098              # 默认：真实配方全 profile
+PROVIDER_ORACLE_FILESTORE=1 node scripts/provider-oracle.mjs  # 强制 FileStore 分支
+node scripts/provider-oracle.mjs --wait 120               # 排除冷启动时序
+PROVIDER_ORACLE_BOOT=1 …                                  # 打印 boot 期全部输出
+```
+
