@@ -65,6 +65,31 @@ export function resetCache(sessionId) {
 }
 
 /**
+ * 缓存里的记录是否「可能比页面旧」——需要重读的信号。
+ *
+ * 为什么需要这个判断：本模块的缓存只在三种时候失效——首次拉起、写入成功、
+ * 用户点「重新读取」。而会话是**持续增长**的：宿主把新回复渲染进 DOM 之后
+ * 还要约 200ms 才落盘（宿主 dsh-session-persistence-jsonl 的 enqueueLive
+ * 用 setTimeout 批处理），本插件的缓存却不会自己更新。于是「伪造掉第一条
+ * 回复之后，后面每一条新回复都拿着旧记录去比对，一律提示对不上」——
+ * 2026-10-15 真机踩到的坑。
+ *
+ * 判据只有一条且是**单调**的：页面上的助手正文块比记录里多。正常会话里
+ * 页面块数永远 ≤ 记录块数（历史可能被虚拟化折叠，记录反而更多），所以这个
+ * 信号不会误报；反过来，页面比记录新只可能是记录过期（或宿主还没落盘）。
+ *
+ * @param {{blocks:Array,error:string|null}|null|null|undefined} entry cachedRecord 的返回值
+ * @param {number} domBlockCount 页面上拾取到的助手正文块数
+ * @returns {boolean} true = 该重读
+ */
+export function recordNeedsRefresh(entry, domBlockCount) {
+  if (!(domBlockCount > 0)) return false
+  if (entry === null || entry === undefined) return true
+  if (entry.error !== null && entry.error !== undefined) return true
+  return domBlockCount > entry.blocks.length
+}
+
+/**
  * 把 DOM 块与磁盘块配对。
  * @param {Array<{seq:number|null,blockIndex:number,text:string}>} diskBlocks 只读路由给的落盘块
  * @param {string[]} domTexts 页面上按顺序的块文本

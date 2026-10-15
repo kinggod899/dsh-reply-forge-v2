@@ -55,20 +55,25 @@ function fireMutations(flush) {
 /** 让挂起的 promise 链跑完（loadRecord → then → scheduleScan）。 */
 const tick = () => new Promise(resolve => setImmediate(resolve))
 
-/** fetch 桩：按 URL 分流到「读记录」与「写记录」。 */
-function makeFetch({ blocks = [], forgeResult = null, readError = null } = {}) {
+/** fetch 桩：按 URL 分流到「读记录」与「写记录」。
+ *  blocksLater：第 2 次及以后的读记录返回值（模拟宿主把新回复落盘后
+ *  记录变多——自动重读修复所依赖的场景）。 */
+function makeFetch({ blocks = [], blocksLater = null, forgeResult = null, readError = null } = {}) {
   const calls = []
+  let reads = 0
   const fetchImpl = (url, init = {}) => {
     const u = String(url)
     calls.push({ url: u, init })
     if (u.includes('/session/blocks')) {
+      reads += 1
       // readError 模拟「会话文件找不到」这类读失败（路由回 ok:false）。
       if (readError !== null) {
         return Promise.resolve({ status: 404, json: () => Promise.resolve({ ok: false, error: readError }) })
       }
+      const serving = (blocksLater !== null && reads >= 2) ? blocksLater : blocks
       return Promise.resolve({
         status: 200,
-        json: () => Promise.resolve({ ok: true, sessionId: 'test-session', file: '/tmp/x', total: blocks.length, blocks }),
+        json: () => Promise.resolve({ ok: true, sessionId: 'test-session', file: '/tmp/x', total: serving.length, blocks: serving }),
       })
     }
     if (u.includes('/session/forge')) {
@@ -89,7 +94,7 @@ function makeFetch({ blocks = [], forgeResult = null, readError = null } = {}) {
  * 传 null 模拟「容器还没挂载 / 属性缺失」。
  */
 function setup({
-  texts = [DEFAULT_TEXT], blocks = null, forgeResult = null, confirmResult = true,
+  texts = [DEFAULT_TEXT], blocks = null, blocksLater = null, forgeResult = null, confirmResult = true,
   sessionAttr = 'test-session', pathname = '/s/test-session', readError = null,
 } = {}) {
   const doc = createDocument()
@@ -108,7 +113,7 @@ function setup({
   const diskBlocks = blocks === null
     ? texts.map((t, i) => ({ seq: 100 + i * 10, blockIndex: 1, text: t }))
     : blocks
-  const { calls, fetchImpl } = makeFetch({ blocks: diskBlocks, forgeResult, readError })
+  const { calls, fetchImpl } = makeFetch({ blocks: diskBlocks, blocksLater, forgeResult, readError })
   return { doc, win, pending, flush, conv, msgs, msg: msgs[0], storage, calls, fetchImpl, confirmCalls, dispatch }
 }
 
@@ -365,13 +370,77 @@ test('记录里有正文但这条对不上 → 提示要区分于「记录是空
   mod.apply({ effect: () => {} })
   await tick(); flush()
   const editor = openEditor(conv.children[0])
+  // 页面比记录新时编辑器会先自动重读一次（防「记录是旧快照」造成误判），
+  // 重读之后仍然是这个结果，才给出最终警示。
+  await tick(); await tick(); flush()
   const warn = editor.querySelector('.rf2-note-warn')
+  assert.ok(warn !== null, '必须给出未定位警示')
   assert.ok(warn.textContent.includes('未在会话记录中定位到'), '实际：' + warn.textContent)
   assert.ok(warn.textContent.includes('记录里有 1 条正文'), '要报出记录规模，便于判断是「没读到」还是「对不上」')
   assert.equal(btn(editor, '写入会话记录').disabled, true)
 })
 
-test('记录读取失败 → 落盘出口禁用，且把真实错误显示出来', async () => {
+// ── v2.3：记录过期自动重读（真机 bug：伪造第一条后，后面每条都定位不上）─────
+
+test('页面比记录新（新回复刚进来）→ 自动重读并把定位补上', async () => {
+  // 真机复现的最小化：首屏页面 1 条、记录 1 条（匹配）。随后宿主插入第二条
+  // 消息，但记录还是旧快照——日志缓存不自己更新，第二条本该永久定位失败。
+  const SECOND = '第二条回复是后来才生成的，长度也够触发识别阈值。'
+  const { doc, win, flush, conv, fetchImpl, calls } = setup({
+    texts: [DEFAULT_TEXT],
+    blocksLater: [
+      { seq: 100, blockIndex: 1, text: DEFAULT_TEXT },
+      { seq: 110, blockIndex: 1, text: SECOND },
+    ],
+  })
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush(); await tick(); flush()
+  const reads = () => calls.filter(c => c.url.includes('/session/blocks')).length
+  assert.equal(reads(), 1, '页面与记录一致时不该反复重读')
+
+  // 宿主把新回复渲染进 DOM（落盘要晚约 200ms，宿主是批处理写入）
+  const second = mk('div', 'Kwoi6G_body')
+  second.append(mk('p', '', SECOND))
+  conv.append(second)
+  fireMutations(flush)
+  await tick(); flush()
+
+  assert.ok(reads() >= 2, '页面比记录新时必须自动重读，实际读次数 ' + reads())
+  await tick(); await tick(); flush()
+  assert.ok(second.hasAttribute('data-rf2-taken'), '新消息块必须被接管')
+  const editor = openEditor(second)
+  const ok = editor.querySelector('.rf2-note-ok')
+  assert.ok(ok !== null, '重读后必须补上定位，实际：'
+    + (editor.querySelector('.rf2-note-warn')?.textContent ?? editor.querySelector('.rf2-note-info')?.textContent ?? 'none'))
+  assert.ok(ok.textContent.includes('seq=110'), '要定位到新落盘的那一条，实际：' + ok.textContent)
+  assert.equal(Boolean(btn(editor, '写入会话记录').disabled), false, '补上定位后就该允许写入')
+})
+
+test('编辑器打开时记录是旧快照 → 先重读再下结论，不当场宣判「对不上」', async () => {
+  // 打开编辑器那一刻记录还没刷新（自动重读有 800ms 间隔）。此时必须先重读，
+  // 而不是把「记录里有 N 条正文」的误判怼到用户脸上。
+  const SECOND = '第二条回复是后来才生成的，长度也够触发识别阈值。'
+  const { doc, win, flush, conv, fetchImpl } = setup({
+    texts: [DEFAULT_TEXT, SECOND],
+    blocks: [{ seq: 100, blockIndex: 1, text: DEFAULT_TEXT }],
+    blocksLater: [
+      { seq: 100, blockIndex: 1, text: DEFAULT_TEXT },
+      { seq: 110, blockIndex: 1, text: SECOND },
+    ],
+  })
+  const mod = loadPlugin(doc, win, fetchImpl)
+  mod.apply({ effect: () => {} })
+  await tick(); flush()
+  const editor = openEditor(conv.children[1])
+  await tick(); await tick(); flush()
+  const ok = editor.querySelector('.rf2-note-ok')
+  assert.ok(ok !== null, '必须补上定位，实际：'
+    + (editor.querySelector('.rf2-note-warn')?.textContent ?? editor.querySelector('.rf2-note-info')?.textContent ?? 'none'))
+  assert.equal(Boolean(btn(editor, '写入会话记录').disabled), false, '定位补上后落盘出口必须可用')
+})
+
+test('记录读失败 → 落盘出口禁用，且把真实错误显示出来', async () => {
   const { doc, win, flush, msg, fetchImpl } = setup({ readError: 'session log not found' })
   const mod = loadPlugin(doc, win, fetchImpl)
   mod.apply({ effect: () => {} })

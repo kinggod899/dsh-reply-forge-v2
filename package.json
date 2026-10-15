@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-reply-forge-v2",
-  "version": "2.0.0",
+  "version": "2.2.1",
   "private": true,
   "type": "module",
   "description": "DSH 桌面端插件 v2：伪造回复写入会话落盘记录，被大模型采信，会话可继续对话",

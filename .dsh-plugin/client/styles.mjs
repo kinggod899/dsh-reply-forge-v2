@@ -55,6 +55,7 @@ export const CSS = `
 .rf2-note{font-size:11px;line-height:1.5}
 .rf2-note-ok{color:#4caf7d}
 .rf2-note-warn{color:#e0a34a}
+.rf2-note-info{color:#6aa9e8}
 .rf2-note-hint{opacity:.5;word-break:break-all}
 
 .rf2-btn[data-rf2-primary]{

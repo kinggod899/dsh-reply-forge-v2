@@ -25,6 +25,7 @@ import {
 } from './store.mjs'
 import {
   loadRecord, cachedRecord, resetCache, matchBlocks, normalizeText, forgeRecord,
+  recordNeedsRefresh,
 } from './record.mjs'
 
 export const name = 'dsh-reply-forge-v2'
@@ -34,6 +35,21 @@ export const inject = ['slots']
 
 const SCAN_DEBOUNCE_MS = 220
 const EDIT_ATTR = 'data-rf2-edited'
+
+// ── 落盘记录的自动重读（2026-10-15 真机 bug 的修复）──────────────────────
+// 症状：伪造掉会话里第一条回复之后，后面新出现的每一条回复都提示
+// 「未在会话记录中定位到这条回复（记录里有 N 条正文）」。
+// 根因：记录缓存不会随会话增长而更新——宿主把新回复渲染进 DOM 后约 200ms
+// 才落盘（dsh-session-persistence-jsonl 的 enqueueLive 是 setTimeout 批处理），
+// 而缓存只在首次拉起/写入成功/用户点「重新读取」时失效。伪造第一条正好
+// 触发一次强制重读，之后的新回复就永远拿着那份旧快照在比对。
+// 修法：页面上出现的正文块比记录里多时，后台自动重读，读完重扫刷新定位。
+
+/** 两次自动重读的最小间隔（毫秒）。防止流式输出期间把读记录打成高频请求。 */
+const RECORD_REFRESH_MIN_GAP_MS = 800
+/** 连续重读都拿不到新块就停手：记录确实只有这么少，或宿主迟迟不落盘。
+ *  停手后用户仍可点「重新读取」手动重试。 */
+const RECORD_REFRESH_MAX_TRIES = 4
 
 /** 本插件自己注入的 UI 类名。取正文时必须跳过它们。 */
 const OWN_UI_CLASSES = ['rf2-bar', 'rf2-editor', 'rf2-note', 'rf2-notes']
@@ -46,6 +62,35 @@ const dupCount = new WeakMap()
 
 /** 已接管的节点 → 落盘记录里的对应块（null = 没对上，落盘出口禁用）。 */
 const blockMatch = new WeakMap()
+
+/** 进行中的强制读记录请求：sessionId → Promise。并发触发时只发一次网络请求。 */
+const recordInflight = new Map()
+
+/**
+ * 读落盘记录；force 时按 sessionId 去重。
+ * 首屏拉起、编辑器补定位、「重新读取」按钮可能同时打到同一个会话，
+ * 没必要为此发多份请求（记录可能很大，逐帧解压有成本）。
+ */
+function readRecord(sessionId, options = {}) {
+  if (options.force !== true) return loadRecord(sessionId)
+  const hit = recordInflight.get(sessionId)
+  if (hit !== undefined) return hit
+  const pending = loadRecord(sessionId, { force: true }).finally(() => recordInflight.delete(sessionId))
+  recordInflight.set(sessionId, pending)
+  return pending
+}
+
+/**
+ * apply() 注入的重扫调度器。编辑器是模块级函数，够不到 apply 的闭包；
+ * 补定位成功后要触发一次扫描把操作条的「已定位」记号刷上。
+ */
+let scheduleScanRef = null
+
+/**
+ * apply() 注入的「记录过期就自动重读」。scan() 同样是模块级函数，
+ * 而退避状态（上次重读时间、连续无果次数）在 apply 的闭包里更自然。
+ */
+let refreshRecordRef = null
 
 /** 编辑态：同一时刻只允许一个编辑器打开。 */
 let openEditor = null
@@ -206,7 +251,8 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
   closeEditor()
   const sessionId = getSessionId()
   const doc = docOverride ?? block.ownerDocument ?? document
-  const match = blockMatch.get(block) ?? null
+  // let 而不是 const：记录过期时下面会重读后补定位，结果要能就地更新。
+  let match = blockMatch.get(block) ?? null
 
   // 初值取「当前显示的正文」：有本机覆盖就是覆盖内容，否则是块里非本插件 UI 的文本。
   const blockFp = taken.get(block)
@@ -258,39 +304,51 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
   // 定位不到就不给落盘出口：宁可少一个按钮，也不能猜个位置去写。
   // 失败原因要分开讲——「记录没读到」「记录是空的」「这条对不上」是三件
   // 完全不同的事，全都显示同一句话会让排查变成猜谜（踩过）。
-  if (match === null) {
-    const rec = cachedRecord(sessionId)
-    if (isPlaceholderSession(sessionId)) {
-      notes.append(makeNote(doc, 'warn',
-        '⚠ 还没识别出当前会话（会话容器尚未就绪）。稍等片刻，或点「重新读取」。'))
-    } else if (rec === null) {
-      notes.append(makeNote(doc, 'warn', '⚠ 正在读取会话记录…稍后重开本编辑器。'))
-    } else if (rec.error !== null) {
-      notes.append(makeNote(doc, 'warn',
-        '⚠ 读取会话记录失败：' + rec.error + '（点「重新读取」重试）'))
-    } else if (rec.blocks.length === 0) {
-      notes.append(makeNote(doc, 'warn',
-        '⚠ 会话记录里没有可定位的助手正文（这个会话可能还没落盘过）。'))
+  //
+  // match 用 let：记录过期时下方会先重读再补定位，定位结果要能就地更新。
+  const matchNote = doc.createElement('div')
+  let relocating = false
+
+  const renderMatch = () => {
+    matchNote.textContent = ''
+    if (match === null) {
+      const rec = cachedRecord(sessionId)
+      if (relocating === true) {
+        matchNote.append(makeNote(doc, 'info', '⏳ 会话记录可能不是最新的，正在重新读取…'))
+      } else if (isPlaceholderSession(sessionId)) {
+        matchNote.append(makeNote(doc, 'warn',
+          '⚠ 还没识别出当前会话（会话容器尚未就绪）。稍等片刻，或点「重新读取」。'))
+      } else if (rec === null) {
+        matchNote.append(makeNote(doc, 'warn', '⚠ 正在读取会话记录…稍后重开本编辑器。'))
+      } else if (rec.error !== null) {
+        matchNote.append(makeNote(doc, 'warn',
+          '⚠ 读取会话记录失败：' + rec.error + '（点「重新读取」重试）'))
+      } else if (rec.blocks.length === 0) {
+        matchNote.append(makeNote(doc, 'warn',
+          '⚠ 会话记录里没有可定位的助手正文（这个会话可能还没落盘过）。'))
+      } else {
+        matchNote.append(makeNote(doc, 'warn',
+          '⚠ 未在会话记录中定位到这条回复（记录里有 ' + rec.blocks.length + ' 条正文，'
+          + '可能是含公式/表格/代码等渲染差异导致对不上）。'))
+      }
+    } else if (match.exact !== true) {
+      matchNote.append(makeNote(doc, 'warn',
+        '⚠ 与记录中的位置是按顺序推断的（seq=' + match.seq + '），未做内容比对。'
+        + '写入前请确认正文无误。'))
     } else {
-      notes.append(makeNote(doc, 'warn',
-        '⚠ 未在会话记录中定位到这条回复（记录里有 ' + rec.blocks.length + ' 条正文，'
-        + '可能是含公式/表格/代码等渲染差异导致对不上）。'))
+      matchNote.append(makeNote(doc, 'ok', '✓ 已定位到会话记录 seq=' + match.seq + '（块 ' + match.blockIndex + '）'))
     }
-  } else if (match.exact !== true) {
-    notes.append(makeNote(doc, 'warn',
-      '⚠ 与记录中的位置是按顺序推断的（seq=' + match.seq + '），未做内容比对。'
-      + '写入前请确认正文无误。'))
-  } else {
-    notes.append(makeNote(doc, 'ok', '✓ 已定位到会话记录 seq=' + match.seq + '（块 ' + match.blockIndex + '）'))
+    saveRecord.disabled = match === null
   }
+
+  notes.append(matchNote)
 
   const cancel = makeButton(doc, '取消', '放弃改动', () => closeEditor())
 
   const refresh = makeButton(doc, '重新读取', '重新读取会话记录并重新定位', () => {
-    resetCache(sessionId)
     closeEditor()
-    loadRecord(sessionId, { force: true })
-      .then(() => scheduleScan())
+    readRecord(sessionId, { force: true })
+      .then(() => { if (scheduleScanRef !== null) scheduleScanRef() })
       .catch(error => log('重新读取失败', error))
   })
 
@@ -350,7 +408,7 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
       attachBar(block, doc, getSessionId, prefs, match)
       // 记录已变，缓存作废，重新读一遍让后续定位对得上。
       resetCache(sessionId)
-      loadRecord(sessionId, { force: true }).then(() => scheduleScan()).catch(() => {})
+      readRecord(sessionId, { force: true }).then(() => { if (scheduleScanRef !== null) scheduleScanRef() }).catch(() => {})
       const done = '✓ 已写入会话记录 · 重启 DSH 后模型生效'
         + (typeof res.backup === 'string' ? ' · 备份：' + res.backup : '')
       block.append(makeNote(doc, 'ok', done))
@@ -362,11 +420,53 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
   }, { 'data-rf2-primary': true })
 
   row.append(status, spacer, refresh, reset, cancel, saveLocal, saveRecord)
-  if (match === null) saveRecord.disabled = true
+  renderMatch()
   wrap.append(...head, area, row)
 
   block.append(wrap)
   try { area.focus() } catch { /* 忽略 */ }
+
+  // ── 记录可能比页面旧：先重读，再下结论 ──────────────────────────────────
+  // 宿主把新回复渲染进 DOM 之后约 200ms 才落盘（dsh-session-persistence-jsonl
+  // 的 enqueueLive 是 setTimeout 批处理），而记录缓存不会自己更新。此刻直接
+  // 宣判「对不上」就是真机上那个 bug：伪造第一条之后，后面每条新回复都永久
+  // 定位失败。所以记录明显比页面旧时，先重读一次，读完就地补定位。
+  if (match === null) {
+    try {
+      const live = pickAssistantBlocks(conversationRoot(doc), classifyNaturalLanguage, { includeTaken: true })
+      const idx = live.indexOf(block)
+      if (idx !== -1) {
+        const liveTexts = live.map(ownText)
+        const rec = cachedRecord(sessionId)
+        // 只在「记录读到了、且明显比页面旧」时补读。记录为空/读失败都是
+        // 终态信息，重读也不会变，直接按原样提示（用户可点「重新读取」）。
+        const stale = rec !== null && rec.error === null && rec.blocks.length > 0
+          && liveTexts.length > rec.blocks.length
+        if (stale === true) {
+          relocating = true
+          renderMatch()
+          readRecord(sessionId, { force: true })
+            .then(() => {
+              const fresh = cachedRecord(sessionId)
+              if (fresh === null || fresh.error !== null || fresh.blocks.length === 0) return
+              const next = matchBlocks(fresh.blocks, liveTexts)[idx] ?? null
+              if (next !== null) {
+                match = next
+                blockMatch.set(block, next)
+              }
+            })
+            .catch(error => log('重新读取失败', error))
+            .then(() => {
+              relocating = false
+              renderMatch()
+              if (scheduleScanRef !== null) scheduleScanRef()
+            })
+        }
+      }
+    } catch (error) {
+      log('补定位失败', error)
+    }
+  }
 
   area.addEventListener('keydown', event => {
     if (event.key === 'Escape') { event.stopPropagation(); closeEditor(); return }
@@ -485,6 +585,13 @@ function scan(getSessionId, prefs, docOverride) {
       log('接管消息块失败', error)
     }
   })
+
+  // 页面比记录新（新回复刚渲染进 DOM，宿主还没落盘 / 缓存是旧快照）→
+  // 后台重读一次，读完会再进来自旋一轮把定位补上。见文件头部说明。
+  // refreshRecordRef 由 apply() 注入（scan 是模块级函数，拿不到闭包状态）。
+  if (refreshRecordRef !== null) {
+    try { refreshRecordRef(sessionId, texts) } catch (error) { log('重读会话记录失败', error) }
+  }
 }
 
 /**
@@ -506,6 +613,10 @@ export function apply(ctx) {
   /** 会话 id 取「用的时候现读」，不要把它固定进闭包（见 attachBar 注释）。 */
   const getSessionId = () => sessionId
 
+  // 落盘记录自动重读的状态（见文件头部 RECORD_REFRESH_* 的说明）。
+  let recordRefreshMisses = 0
+  let lastRecordRefreshAt = 0
+
   /** 扫描节流：流式输出期间宿主高频重渲染，按帧合并。 */
   let timer = null
   const scheduleScan = () => {
@@ -515,12 +626,48 @@ export function apply(ctx) {
       try { runScan() } catch (error) { log('扫描失败', error) }
     }, SCAN_DEBOUNCE_MS)
   }
+  // 供模块级的 openBlockEditor 用（补定位成功后要重扫一次刷操作条记号）。
+  scheduleScanRef = scheduleScan
+
+  /**
+   * 页面上的正文块比记录里多 → 记录过期了，后台重读一次，读完重扫。
+   *
+   * 不重读的后果就是真机上那个 bug：伪造第一条之后，后面每条新回复都拿着
+   * 旧快照比对，永久提示「记录里有 N 条正文，对不上」。
+   *
+   * 双重退避：时间间隔 + 连续无果次数。页面再次增长（lastDomBlockCount 变化）
+   * 会解除退避——用户继续聊天就该继续尝试，不能被一次「读不到」永久堵死。
+   */
+  let lastDomBlockCount = -1
+  const refreshRecordIfStale = (sid, domTexts) => {
+    if (isPlaceholderSession(sid)) return
+    // 页面块数变了（新回复进来 / 历史折叠）→ 重新给自动重读计机会
+    if (domTexts.length !== lastDomBlockCount) {
+      lastDomBlockCount = domTexts.length
+      recordRefreshMisses = 0
+    }
+    if (recordRefreshMisses >= RECORD_REFRESH_MAX_TRIES) return
+    if (Date.now() - lastRecordRefreshAt < RECORD_REFRESH_MIN_GAP_MS) return
+    const rec = cachedRecord(sid)
+    if (recordNeedsRefresh(rec, domTexts.length) !== true) return
+    const before = rec === null ? -1 : rec.blocks.length
+    lastRecordRefreshAt = Date.now()
+    readRecord(sid, { force: true })
+      .then(next => {
+        // 读到的块数没变 → 记一次无果；变了 → 复位（会话在正常增长）。
+        recordRefreshMisses = next.blocks.length === before ? recordRefreshMisses + 1 : 0
+        scheduleScan()
+      })
+      .catch(() => { recordRefreshMisses += 1 })
+  }
+  // 供模块级的 scan() 用：页面比记录新时自动重读（scan 拿不到 apply 的闭包）。
+  refreshRecordRef = refreshRecordIfStale
 
   /** 拉一次落盘记录，拿到后重扫以便刷新定位。 */
   const syncRecord = () => {
     // 还没识别出会话时不发请求：路由必然 404，只会刷一屏没用的噪音。
     if (isPlaceholderSession(sessionId)) return
-    loadRecord(sessionId)
+    readRecord(sessionId)
       .then(() => scheduleScan())
       .catch(error => log('读取会话记录失败', error))
   }
@@ -540,6 +687,8 @@ export function apply(ctx) {
       // 会话真的变了（首屏就绪 / 切到别的会话）：关掉编辑态、重新拉记录。
       if (isPlaceholderSession(sessionId) === false) closeEditor()
       sessionId = next
+      // 换会话后自动重读的退避计数归零：新会话的增长是独立计量的。
+      recordRefreshMisses = 0
       syncRecord()
     }
     scan(getSessionId, prefs, document)
@@ -605,7 +754,7 @@ export function apply(ctx) {
   // 调试命名空间：不注册任何宿主槽位，只在 window 上暴露，供手动排查。
   try {
     window.__dshReplyForgeV2 = {
-      version: '2.0.0',
+      version: '2.2.1',
       sessionId() { return sessionId },
       /** 直接从 DOM 现读一次（排查「id 认错了」时对比用）。 */
       domSessionId() { return currentSessionId(document) },
@@ -644,6 +793,8 @@ export function apply(ctx) {
           diskBlocks: rec.blocks.length,
           matched: matches.filter(m => m !== null).length,
           exact: matches.filter(m => m !== null && m.exact === true).length,
+          // 页面比记录多 → 记录过期，正在自动重读（排查「新回复定位不上」时看这里）
+          stale: recordNeedsRefresh(rec, blocks.length),
           rows: matches.map((m, i) => ({
             domIndex: i,
             preview: ownText(blocks[i]).slice(0, 40),

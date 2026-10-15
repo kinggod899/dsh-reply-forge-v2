@@ -61,6 +61,7 @@ const CSS = `
 .rf2-note{font-size:11px;line-height:1.5}
 .rf2-note-ok{color:#4caf7d}
 .rf2-note-warn{color:#e0a34a}
+.rf2-note-info{color:#6aa9e8}
 .rf2-note-hint{opacity:.5;word-break:break-all}
 
 .rf2-btn[data-rf2-primary]{
@@ -839,6 +840,31 @@ function resetCache(sessionId) {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+function recordNeedsRefresh(entry, domBlockCount) {
+  if (!(domBlockCount > 0)) return false
+  if (entry === null || entry === undefined) return true
+  if (entry.error !== null && entry.error !== undefined) return true
+  return domBlockCount > entry.blocks.length
+}
+
+
+
+
+
+
+
+
 function matchBlocks(diskBlocks, domTexts) {
   const out = domTexts.map(() => null)
   const used = new Set()
@@ -904,13 +930,14 @@ async function forgeRecord(payload) {
   }
 }
 
- return { normalizeText: normalizeText, loadRecord: loadRecord, cachedRecord: cachedRecord, resetCache: resetCache, matchBlocks: matchBlocks, forgeRecord: forgeRecord } })();
+ return { normalizeText: normalizeText, loadRecord: loadRecord, cachedRecord: cachedRecord, resetCache: resetCache, recordNeedsRefresh: recordNeedsRefresh, matchBlocks: matchBlocks, forgeRecord: forgeRecord } })();
 var loadRecord = __my_forge_v2__dsh_plugin_client_record_mjs.loadRecord;
 var cachedRecord = __my_forge_v2__dsh_plugin_client_record_mjs.cachedRecord;
 var resetCache = __my_forge_v2__dsh_plugin_client_record_mjs.resetCache;
 var matchBlocks = __my_forge_v2__dsh_plugin_client_record_mjs.matchBlocks;
 var normalizeText = __my_forge_v2__dsh_plugin_client_record_mjs.normalizeText;
 var forgeRecord = __my_forge_v2__dsh_plugin_client_record_mjs.forgeRecord;
+var recordNeedsRefresh = __my_forge_v2__dsh_plugin_client_record_mjs.recordNeedsRefresh;
 
 
 
@@ -944,6 +971,21 @@ const SCAN_DEBOUNCE_MS = 220
 const EDIT_ATTR = 'data-rf2-edited'
 
 
+
+
+
+
+
+
+
+
+
+const RECORD_REFRESH_MIN_GAP_MS = 800
+
+
+const RECORD_REFRESH_MAX_TRIES = 4
+
+
 const OWN_UI_CLASSES = ['rf2-bar', 'rf2-editor', 'rf2-note', 'rf2-notes']
 
 
@@ -954,6 +996,35 @@ const dupCount = new WeakMap()
 
 
 const blockMatch = new WeakMap()
+
+
+const recordInflight = new Map()
+
+
+
+
+
+
+function readRecord(sessionId, options = {}) {
+  if (options.force !== true) return loadRecord(sessionId)
+  const hit = recordInflight.get(sessionId)
+  if (hit !== undefined) return hit
+  const pending = loadRecord(sessionId, { force: true }).finally(() => recordInflight.delete(sessionId))
+  recordInflight.set(sessionId, pending)
+  return pending
+}
+
+
+
+
+
+let scheduleScanRef = null
+
+
+
+
+
+let refreshRecordRef = null
 
 
 let openEditor = null
@@ -1114,7 +1185,8 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
   closeEditor()
   const sessionId = getSessionId()
   const doc = docOverride ?? block.ownerDocument ?? document
-  const match = blockMatch.get(block) ?? null
+  
+  let match = blockMatch.get(block) ?? null
 
   
   const blockFp = taken.get(block)
@@ -1166,39 +1238,51 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
   
   
   
-  if (match === null) {
-    const rec = cachedRecord(sessionId)
-    if (isPlaceholderSession(sessionId)) {
-      notes.append(makeNote(doc, 'warn',
-        '⚠ 还没识别出当前会话（会话容器尚未就绪）。稍等片刻，或点「重新读取」。'))
-    } else if (rec === null) {
-      notes.append(makeNote(doc, 'warn', '⚠ 正在读取会话记录…稍后重开本编辑器。'))
-    } else if (rec.error !== null) {
-      notes.append(makeNote(doc, 'warn',
-        '⚠ 读取会话记录失败：' + rec.error + '（点「重新读取」重试）'))
-    } else if (rec.blocks.length === 0) {
-      notes.append(makeNote(doc, 'warn',
-        '⚠ 会话记录里没有可定位的助手正文（这个会话可能还没落盘过）。'))
+  
+  
+  const matchNote = doc.createElement('div')
+  let relocating = false
+
+  const renderMatch = () => {
+    matchNote.textContent = ''
+    if (match === null) {
+      const rec = cachedRecord(sessionId)
+      if (relocating === true) {
+        matchNote.append(makeNote(doc, 'info', '⏳ 会话记录可能不是最新的，正在重新读取…'))
+      } else if (isPlaceholderSession(sessionId)) {
+        matchNote.append(makeNote(doc, 'warn',
+          '⚠ 还没识别出当前会话（会话容器尚未就绪）。稍等片刻，或点「重新读取」。'))
+      } else if (rec === null) {
+        matchNote.append(makeNote(doc, 'warn', '⚠ 正在读取会话记录…稍后重开本编辑器。'))
+      } else if (rec.error !== null) {
+        matchNote.append(makeNote(doc, 'warn',
+          '⚠ 读取会话记录失败：' + rec.error + '（点「重新读取」重试）'))
+      } else if (rec.blocks.length === 0) {
+        matchNote.append(makeNote(doc, 'warn',
+          '⚠ 会话记录里没有可定位的助手正文（这个会话可能还没落盘过）。'))
+      } else {
+        matchNote.append(makeNote(doc, 'warn',
+          '⚠ 未在会话记录中定位到这条回复（记录里有 ' + rec.blocks.length + ' 条正文，'
+          + '可能是含公式/表格/代码等渲染差异导致对不上）。'))
+      }
+    } else if (match.exact !== true) {
+      matchNote.append(makeNote(doc, 'warn',
+        '⚠ 与记录中的位置是按顺序推断的（seq=' + match.seq + '），未做内容比对。'
+        + '写入前请确认正文无误。'))
     } else {
-      notes.append(makeNote(doc, 'warn',
-        '⚠ 未在会话记录中定位到这条回复（记录里有 ' + rec.blocks.length + ' 条正文，'
-        + '可能是含公式/表格/代码等渲染差异导致对不上）。'))
+      matchNote.append(makeNote(doc, 'ok', '✓ 已定位到会话记录 seq=' + match.seq + '（块 ' + match.blockIndex + '）'))
     }
-  } else if (match.exact !== true) {
-    notes.append(makeNote(doc, 'warn',
-      '⚠ 与记录中的位置是按顺序推断的（seq=' + match.seq + '），未做内容比对。'
-      + '写入前请确认正文无误。'))
-  } else {
-    notes.append(makeNote(doc, 'ok', '✓ 已定位到会话记录 seq=' + match.seq + '（块 ' + match.blockIndex + '）'))
+    saveRecord.disabled = match === null
   }
+
+  notes.append(matchNote)
 
   const cancel = makeButton(doc, '取消', '放弃改动', () => closeEditor())
 
   const refresh = makeButton(doc, '重新读取', '重新读取会话记录并重新定位', () => {
-    resetCache(sessionId)
     closeEditor()
-    loadRecord(sessionId, { force: true })
-      .then(() => scheduleScan())
+    readRecord(sessionId, { force: true })
+      .then(() => { if (scheduleScanRef !== null) scheduleScanRef() })
       .catch(error => log('重新读取失败', error))
   })
 
@@ -1258,7 +1342,7 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
       attachBar(block, doc, getSessionId, prefs, match)
       
       resetCache(sessionId)
-      loadRecord(sessionId, { force: true }).then(() => scheduleScan()).catch(() => {})
+      readRecord(sessionId, { force: true }).then(() => { if (scheduleScanRef !== null) scheduleScanRef() }).catch(() => {})
       const done = '✓ 已写入会话记录 · 重启 DSH 后模型生效'
         + (typeof res.backup === 'string' ? ' · 备份：' + res.backup : '')
       block.append(makeNote(doc, 'ok', done))
@@ -1270,11 +1354,53 @@ function openBlockEditor(block, getSessionId, prefs, docOverride) {
   }, { 'data-rf2-primary': true })
 
   row.append(status, spacer, refresh, reset, cancel, saveLocal, saveRecord)
-  if (match === null) saveRecord.disabled = true
+  renderMatch()
   wrap.append(...head, area, row)
 
   block.append(wrap)
   try { area.focus() } catch {  }
+
+  
+  
+  
+  
+  
+  if (match === null) {
+    try {
+      const live = pickAssistantBlocks(conversationRoot(doc), classifyNaturalLanguage, { includeTaken: true })
+      const idx = live.indexOf(block)
+      if (idx !== -1) {
+        const liveTexts = live.map(ownText)
+        const rec = cachedRecord(sessionId)
+        
+        
+        const stale = rec !== null && rec.error === null && rec.blocks.length > 0
+          && liveTexts.length > rec.blocks.length
+        if (stale === true) {
+          relocating = true
+          renderMatch()
+          readRecord(sessionId, { force: true })
+            .then(() => {
+              const fresh = cachedRecord(sessionId)
+              if (fresh === null || fresh.error !== null || fresh.blocks.length === 0) return
+              const next = matchBlocks(fresh.blocks, liveTexts)[idx] ?? null
+              if (next !== null) {
+                match = next
+                blockMatch.set(block, next)
+              }
+            })
+            .catch(error => log('重新读取失败', error))
+            .then(() => {
+              relocating = false
+              renderMatch()
+              if (scheduleScanRef !== null) scheduleScanRef()
+            })
+        }
+      }
+    } catch (error) {
+      log('补定位失败', error)
+    }
+  }
 
   area.addEventListener('keydown', event => {
     if (event.key === 'Escape') { event.stopPropagation(); closeEditor(); return }
@@ -1393,6 +1519,13 @@ function scan(getSessionId, prefs, docOverride) {
       log('接管消息块失败', error)
     }
   })
+
+  
+  
+  
+  if (refreshRecordRef !== null) {
+    try { refreshRecordRef(sessionId, texts) } catch (error) { log('重读会话记录失败', error) }
+  }
 }
 
 
@@ -1415,6 +1548,10 @@ function apply(ctx) {
   const getSessionId = () => sessionId
 
   
+  let recordRefreshMisses = 0
+  let lastRecordRefreshAt = 0
+
+  
   let timer = null
   const scheduleScan = () => {
     if (timer !== null) return
@@ -1423,12 +1560,48 @@ function apply(ctx) {
       try { runScan() } catch (error) { log('扫描失败', error) }
     }, SCAN_DEBOUNCE_MS)
   }
+  
+  scheduleScanRef = scheduleScan
+
+  
+
+
+
+
+
+
+
+
+  let lastDomBlockCount = -1
+  const refreshRecordIfStale = (sid, domTexts) => {
+    if (isPlaceholderSession(sid)) return
+    
+    if (domTexts.length !== lastDomBlockCount) {
+      lastDomBlockCount = domTexts.length
+      recordRefreshMisses = 0
+    }
+    if (recordRefreshMisses >= RECORD_REFRESH_MAX_TRIES) return
+    if (Date.now() - lastRecordRefreshAt < RECORD_REFRESH_MIN_GAP_MS) return
+    const rec = cachedRecord(sid)
+    if (recordNeedsRefresh(rec, domTexts.length) !== true) return
+    const before = rec === null ? -1 : rec.blocks.length
+    lastRecordRefreshAt = Date.now()
+    readRecord(sid, { force: true })
+      .then(next => {
+        
+        recordRefreshMisses = next.blocks.length === before ? recordRefreshMisses + 1 : 0
+        scheduleScan()
+      })
+      .catch(() => { recordRefreshMisses += 1 })
+  }
+  
+  refreshRecordRef = refreshRecordIfStale
 
   
   const syncRecord = () => {
     
     if (isPlaceholderSession(sessionId)) return
-    loadRecord(sessionId)
+    readRecord(sessionId)
       .then(() => scheduleScan())
       .catch(error => log('读取会话记录失败', error))
   }
@@ -1448,6 +1621,8 @@ function apply(ctx) {
       
       if (isPlaceholderSession(sessionId) === false) closeEditor()
       sessionId = next
+      
+      recordRefreshMisses = 0
       syncRecord()
     }
     scan(getSessionId, prefs, document)
@@ -1513,7 +1688,7 @@ function apply(ctx) {
   
   try {
     window.__dshReplyForgeV2 = {
-      version: '2.0.0',
+      version: '2.2.1',
       sessionId() { return sessionId },
       
       domSessionId() { return currentSessionId(document) },
@@ -1552,6 +1727,8 @@ function apply(ctx) {
           diskBlocks: rec.blocks.length,
           matched: matches.filter(m => m !== null).length,
           exact: matches.filter(m => m !== null && m.exact === true).length,
+          
+          stale: recordNeedsRefresh(rec, blocks.length),
           rows: matches.map((m, i) => ({
             domIndex: i,
             preview: ownText(blocks[i]).slice(0, 40),

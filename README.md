@@ -18,7 +18,8 @@ DSH 桌面端插件 v2：**真伪造**——改写的 AI 回复进入会话落�
 
 ## 当前状态（2026-10-15）
 
-**v2.0 与 v2.2 已实现；v2.2 已安装进 desktop profile，等重启 DSH 生效。**
+**v2.0 与 v2.2 已实现；v2.2.1 修复了两处真机 bug（会话 id 寻址 + 记录缓存过期），
+已安装进 desktop profile，等重启 DSH 生效。**
 设计与实证见 [PLAN.md](PLAN.md)。
 
 | 阶段 | 内容 | 状态 |
@@ -26,8 +27,9 @@ DSH 桌面端插件 v2：**真伪造**——改写的 AI 回复进入会话落�
 | v2.0 | 关闭态落盘改写器（CLI） | ✅ 实现完成，读取侧验收通过 |
 | v2.0 | 真机重启后模型侧采信 | ✅ 用户实测通过（编辑内容被大模型认可） |
 | v2.1 | 运行态写入（探针先行） | ⬜ 未开工 |
-| v2.2 | UI 合一（dsh 插件形态） | ✅ 实现完成，已安装，待重启验证 |
-| v2.2 | 真机重启后 UI 生效 | ⬜ 待用户实测 |
+| v2.2 | UI 合一（dsh 插件形态） | ✅ 实现完成，已安装 |
+| v2.2 | 真机重启后 UI 生效 | ✅ 用户实测可用（含两条回复的伪造） |
+| v2.2.1 | 真机 bug 修复 | ✅ 已修（详见 PLAN §9.8），待重启验证 |
 
 已落地的代码：
 
@@ -48,6 +50,7 @@ DSH 桌面端插件 v2：**真伪造**——改写的 AI 回复进入会话落�
 - `.dsh-plugin/client/index.mjs` —— client half：在每条助手回复下挂操作条，
   就地编辑器双出口（`仅本机渲染` / `写入会话记录`）。会话 id 取自宿主渲染的
   `data-conversation-session` 属性——dsh 的 URL 里没有会话 id（见 PLAN §9.7）；
+  记录比页面旧时自动重读补定位，不让用户对着一句过时的「对不上」干瞪眼（§9.8）；
 - `.dsh-plugin/client/record.mjs` —— 磁盘记录访问层 + DOM↔磁盘两级匹配；
 - `.dsh-plugin/client/{picker,markdown,classify,store,styles}.mjs` ——
   从 v1 移植的 UI 模块（前缀全部改为 `rf2-`，与 v1 严格隔离）；
@@ -68,8 +71,8 @@ DSH 桌面端插件 v2：**真伪造**——改写的 AI 回复进入会话落�
   回答「这个会话还能不能继续对话」；
 - `scripts/frame-anatomy.mjs` —— 帧结构解剖辅助工具。
 
-测试 **69/69**：`session-log` 11 + `session-write` 15 + `session-anatomy` 7 +
-`client` 21 + `routes` 15。跑法：
+测试 **71/71**：`session-log` 11 + `session-write` 15 + `session-anatomy` 7 +
+`client` 23 + `routes` 15。跑法：
 
 ```bash
 for f in tests/*.test.mjs; do node "$f"; done
