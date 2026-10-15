@@ -38,6 +38,26 @@ for (let i = 0; i < args.length; i += 1) {
 const log = (...a) => console.log('[forge]', ...a)
 const die = msg => { console.error('[forge] 错误：' + msg); process.exit(1) }
 
+// DSH 桌面端可执行文件名。真实安装：E:\game\DeepSeekHarness\DeepSeek Harness.exe
+// （从开始菜单快捷方式 DeepSeek Harness.lnk 解析确认）。
+const DSH_EXE = 'DeepSeek Harness.exe'
+
+/**
+ * 探测 DSH 桌面端是否在运行。
+ * @returns {{running: true|false|null, detail: string}} running=null 表示「探不到」，
+ *   与「确认没在跑」是两回事——调用方必须区别对待，不能把探不到当成没在跑。
+ */
+function detectDshRunning() {
+  const r = spawnSync('tasklist', [], { encoding: 'buffer' })
+  if (r.error !== undefined && r.error !== null) return { running: null, detail: 'tasklist 启动失败（' + (r.error.message ?? r.error) + '）' }
+  if (r.status !== 0) return { running: null, detail: 'tasklist 退出码 ' + r.status }
+  const raw = r.stdout ?? Buffer.alloc(0)
+  if (raw.length === 0) return { running: null, detail: 'tasklist 无输出' }
+  // 中文 Windows 上 tasklist 输出是 CP936 而非 UTF-16：用 latin1 逐字节保留，
+  // 进程名是纯 ASCII，照样能匹配（用 utf16le 解码只会得到乱码）。
+  return { running: new RegExp(DSH_EXE.replace(/\./g, '\\.'), 'i').test(raw.toString('latin1')), detail: '已扫描 tasklist 输出 ' + raw.length + ' 字节' }
+}
+
 if (opt.restore === true) {
   if (opt.file === undefined || opt.backup === undefined) die('--restore 需要 --file 与 --backup')
   if (!existsSync(opt.backup)) die('备份不存在：' + opt.backup)
@@ -57,20 +77,6 @@ if (file === undefined) {
 }
 if (existsSync(file) === false) die('文件不存在：' + file)
 log('目标文件: ' + file + '（' + statSync(file).size + 'B）')
-
-// dsh 运行中检测（v2.0 = 关闭态写入）
-if (opt['allow-running'] !== true) {
-  let running = false
-  try {
-    const r = spawnSync('tasklist', ['/FI', 'IMAGENAME eq DeepSeek Harness.exe'], { encoding: 'buffer' })
-    const text = Buffer.from(r.stdout ?? Buffer.alloc(0)).toString('utf16le') + Buffer.from(r.stdout ?? Buffer.alloc(0)).toString('latin1')
-    running = /DeepSeek Harness\.exe/i.test(text)
-  } catch { /* 检测失败不阻塞，仅警告 */ }
-  if (running) {
-    die('检测到 DSH 桌面端正在运行。v2.0 是关闭态写入：请先完全退出 DSH 再执行；'
-      + '确认要在运行中写入请加 --allow-running（自读校验仍会兜底，但宿主内存态可能覆盖，属 v2.1 未验证领域）')
-  }
-}
 
 const loaded = loadLines(file)
 
@@ -108,6 +114,25 @@ for (const h of hits) {
   log(`命中 seq=${h.seq ?? '-'} fp=${h.fingerprint}：`)
   console.log('  旧：' + h.text.replace(/\s+/g, ' ').slice(0, 100) + (h.text.length > 100 ? '…' : ''))
   console.log('  新：' + newText.replace(/\s+/g, ' ').slice(0, 100) + (newText.length > 100 ? '…' : ''))
+}
+
+// dsh 运行中检测（v2.0 = 关闭态写入）。
+// 位置刻意放在真正落盘之前、--list 之后：读操作不该被写保护挡住。
+if (opt['allow-running'] !== true) {
+  const probe = detectDshRunning()
+  if (probe.running === true) {
+    die('检测到 DSH 桌面端正在运行。v2.0 是关闭态写入：请先完全退出 DSH 再执行；'
+      + '确认要在运行中写入请加 --allow-running（自读校验仍会兜底，但宿主内存态可能覆盖，属 v2.1 未验证领域）')
+  }
+  if (probe.running === null) {
+    // 探不到 ≠ 没在跑。这里是「大声警告后继续」，不是静默放行——
+    // 最坏情况是 DSH 退出时把内存态回写、覆盖掉本次改写，所以必须让用户看见。
+    log('警告：无法确认 DSH 是否在运行（' + probe.detail + '）。')
+    log('      如果你此刻正开着 DSH，请先完全退出再继续——否则它退出时的回写可能覆盖本次改写。')
+    log('      确认无误可忽略本警告；想跳过检测请加 --allow-running。')
+  } else {
+    log('DSH 未在运行（' + probe.detail + '），可以进行关闭态写入。')
+  }
 }
 
 const result = forgeSession(file, {
