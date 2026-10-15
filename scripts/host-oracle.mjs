@@ -23,9 +23,10 @@
 //   node scripts/host-oracle.mjs --home <临时家目录> --expect "<原文>"   # 对照组
 //   环境变量 ORACLE_DUMP=1 打印返回结构细节（排障用）
 //
-// 依赖：DSH_HOST_DIR 或 scripts/diag.config.json 的 hostDir（默认指向
-// DeepSeek Harness 桌面端的 dsh 安装目录，其 node_modules 含全部 @deepseek-ai/*）；
-// 宿主 cwd 决定工作区 slug，默认 E:\文档（真实会话所在工作区）。
+// 依赖：DSH_HOST_DIR / scripts/diag.config.json 的 hostDir / DSH_WORKSPACE。
+//   hostDir   = DeepSeek Harness 桌面端自带的 dsh 安装目录
+//              （<安装目录>/resources/app/dsh，其 node_modules 含全部 @deepseek-ai/*）
+//   workspace = 真实会话所在的工作区（宿主按 cwd 算 slug；默认取当前目录）
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { readFileSync, existsSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -42,7 +43,12 @@ if (existsSync(join(HERE, 'diag.config.json'))) {
 // ---- 宿主安装解析（App 自带 dsh，其 node_modules 含全部 @deepseek-ai/*） ----
 // 真实桌面端 boot 时把 bareModuleBaseUrl 指向自己的安装目录，裸包名
 // （如 @deepseek-ai/dsh-agent-preset，开发 checkout 里只有复数版）在那里解析。
-const HOST_DIR = process.env.DSH_HOST_DIR ?? cfg.hostDir ?? 'E:/game/DeepSeekHarness/resources/app/dsh'
+const HOST_DIR = process.env.DSH_HOST_DIR ?? cfg.hostDir ?? ''
+if (HOST_DIR === '') {
+  console.error('缺少 dsh 安装目录。请设 DSH_HOST_DIR=<桌面端>/resources/app/dsh，')
+  console.error('或创建 scripts/diag.config.json：{ "hostDir": "<桌面端>/resources/app/dsh" }')
+  process.exit(1)
+}
 const require2 = requireCheckout(HOST_DIR)
 const { boot, loadProfileDirectory } = await import(pathToFileURL(require2.resolve('@deepseek-ai/dsh-app-boot')).href)
 const { provideCmdline } = await import(pathToFileURL(require2.resolve('@deepseek-ai/dsh-cmdline')).href)
@@ -60,8 +66,9 @@ if (HOME === '' || EXPECT === '') {
   process.exit(1)
 }
 
-// 工作区 cwd：真实会话所在工作区（可用 DSH_WORKSPACE/cfg.workspace 覆盖）
-const WORKSPACE = process.env.DSH_WORKSPACE ?? cfg.workspace ?? 'E:/文档'
+// 工作区 cwd：宿主按它算工作区 slug，要和目标会话的 slug 对得上
+// （可用 DSH_WORKSPACE / cfg.workspace 覆盖；默认当前目录）
+const WORKSPACE = process.env.DSH_WORKSPACE ?? cfg.workspace ?? process.cwd()
 try { process.chdir(WORKSPACE) } catch { /* 失败也不致命，slug 可能不同 */ }
 
 // ---- 起 slim host（只测宿主读取器） ----

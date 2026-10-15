@@ -1,9 +1,9 @@
 // 会话解剖 / 上下文预算体检（scripts/session-anatomy.mjs）
 //
-// 为什么需要它：v2 的目标 3 是「还能继续对话」。2026-10-15 踩到的第一个真实
-// 失败不是改写造成的，而是**会话自己太大了**——
-//   session-7c5ee6b6（从被改写的 2915d6b2 分叉而来）上下文 527,303 tokens，
-//   用户把模型切到 buddy/hy3（远端声明 100,000 窗口）→
+// 为什么需要它：v2 的目标 3 是「还能继续对话」。一个真实失败案例不是改写造成
+// 的，而是**会话自己太大了**——
+//   某会话（从被改写的会话分叉而来）有效上下文涨到约 52 万 tokens，
+//   用户把模型切到一个上游声明 10 万窗口的模型 →
 //   CONTEXT_WINDOW_EXCEEDED，且 dsh 的自动压缩也救不回来（压缩请求自己超限）。
 // 于是「改写前/后能不能继续对话」需要一个能直接读出来的体检报告，而不是靠猜。
 //
@@ -16,17 +16,17 @@
 //   request/header.tools              → 工具定义体积（prompt 的固定开销）
 //
 // 有效上下文口径：inputTokens + cacheReadTokens + cacheWriteTokens。
-// 实测（本机 2026-10-15）：
-//   turn2 157+186304=186461 / turn3 2450+195072=197522 / turn4 2091+254400=256491
-//   turn5 860+317312=318172 / turn8 505671+21632=527303
+// 实测（同一会话的几轮，取整到百位）：
+//   turn2 157+186304=186461 → 18.6 万；turn3 → 19.8 万；turn4 → 25.6 万
+//   turn5 → 31.8 万；turn8 505671+21632=527303 → 52.7 万
 // 缓存命中的部分不会出现在 inputTokens 里，只加 inputTokens 会严重低估。
 //
 // 用法：
-//   node scripts/session-anatomy.mjs --session 7c5ee6b6
+//   node scripts/session-anatomy.mjs --session <会话id>
 //   node scripts/session-anatomy.mjs --file <会话文件>
 //   node scripts/session-anatomy.mjs --list
-//   node scripts/session-anatomy.mjs --session 7c5ee6b6 --turns 10 --json
-//   node scripts/session-anatomy.mjs --session 7c5ee6b6 --marker FORGE-OK
+//   node scripts/session-anatomy.mjs --session <会话id> --turns 10 --json
+//   node scripts/session-anatomy.mjs --session <会话id> --marker FORGE-OK
 //
 // 退出码：有 blocker → 2；正常 → 0；找不到文件 → 1。
 // 两种输出模式（文本 / --json）**共用同一套退出码**，便于脚本链式判断。
@@ -275,7 +275,7 @@ export function analyzeSession({ file, turns = 6, marker = '' }) {
       level: 'blocker',
       code: lastFailure.code,
       message: `会话上下文 ${peak?.contextTokens ?? '?'} tokens，失败那一轮用的模型 ${who} 装不下（上游报 ${lastFailure.message ?? ''}）。`,
-      action: '换回大窗口模型（本机实测：deepseek-official/deepseek-flash、workbuddy/deepseek-v4.1-flash、our-free-model/deepseek-ai/deepseek-v4.1-flash 均为 1M 窗口），或新建任务。',
+      action: '换回大窗口模型（上游声明 1M 窗口的模型，具体以 modelCatalog 为准），或新建任务。',
     })
   } else if (lastFailure !== null && lastFailure.code === 'NO_ADAPTER') {
     const who = lastTurn?.provider ?? lastSelection?.provider ?? '?'

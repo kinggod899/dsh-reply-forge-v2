@@ -27,7 +27,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve))
 
 /** 把事件逐条压成独立帧（会话头一帧 + 每事件一帧）。 */
 function sessionBytes(events) {
-  const parts = [Buffer.from(JSON.stringify({ type: 'session', version: 4, id: SESSION_ID, createdAt: 1, cwd: 'E:\\文档' }) + '\n')]
+  const parts = [Buffer.from(JSON.stringify({ type: 'session', version: 4, id: SESSION_ID, createdAt: 1, cwd: 'C:\\workspace' }) + '\n')]
   for (const ev of events) parts.push(Buffer.from(JSON.stringify(ev) + '\n'))
   return Buffer.concat(parts.map(p => zstdCompressSync(p)))
 }

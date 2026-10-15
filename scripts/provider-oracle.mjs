@@ -29,7 +29,8 @@
 //   PROVIDER_ORACLE_BOOT=1 打印 boot 期间捕获的 console 输出
 //   PROVIDER_ORACLE_JSON=1 打印 modelCatalog 原始 JSON
 //
-// 依赖：DSH_HOST_DIR 或 scripts/diag.config.json 的 hostDir。
+// 依赖：DSH_HOST_DIR 或 scripts/diag.config.json 的 hostDir
+//   = DeepSeek Harness 桌面端自带的 dsh 安装目录（<安装目录>/resources/app/dsh）
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { readFileSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -43,7 +44,12 @@ if (existsSync(join(HERE, 'diag.config.json'))) {
   try { cfg = JSON.parse(readFileSync(join(HERE, 'diag.config.json'), 'utf8')) } catch { cfg = {} }
 }
 
-const HOST_DIR = process.env.DSH_HOST_DIR ?? cfg.hostDir ?? 'E:/game/DeepSeekHarness/resources/app/dsh'
+const HOST_DIR = process.env.DSH_HOST_DIR ?? cfg.hostDir ?? ''
+if (HOST_DIR === '') {
+  console.error('缺少 dsh 安装目录。请设 DSH_HOST_DIR=<桌面端>/resources/app/dsh，')
+  console.error('或创建 scripts/diag.config.json：{ "hostDir": "<桌面端>/resources/app/dsh" }')
+  process.exit(1)
+}
 const require2 = requireCheckout(HOST_DIR)
 const bootPkg = pathToFileURL(require2.resolve('@deepseek-ai/dsh-app-boot')).href
 const { boot, loadProfileDirectory, createRuntimeResolution, readProfilePatches, PluginPackages } = await import(bootPkg)

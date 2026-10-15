@@ -27,7 +27,7 @@ if not defined NODE if defined DSH_APP_DIR if exist "%DSH_APP_DIR%\resources\app
 if not defined NODE (
   echo [错误] 未找到 node.exe，无法自动执行。请手动完成以下三步：
   echo   1. 编辑 %PROFILE_DIR%\package.json
-  echo      dependencies 加入  "@local/dsh-reply-forge-v2": "link:E:/文档/dsh-reply-forge-v2"
+  echo      dependencies 加入  "@local/dsh-reply-forge-v2": "link:<本仓库绝对路径>"
   echo      dsh.profile.bundles 末尾加入  "@local/dsh-reply-forge-v2"
   echo   2. 编辑 %PROFILE_DIR%\cordis.patch.yml，删除 id: dsh-reply-forge 的整条条目
   echo   3. 建立链接：

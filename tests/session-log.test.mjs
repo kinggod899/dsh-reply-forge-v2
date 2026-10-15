@@ -164,8 +164,8 @@ const root = mkdtempSync(path.join(tmpdir(), 'rf-session-test-'))
   test('sessionsRootDefault 尊重 DSH_HOME', () => {
     const prev = process.env.DSH_HOME
     try {
-      process.env.DSH_HOME = 'D:\\somewhere\\custom'
-      assert.equal(sessionsRootDefault(), path.join(path.resolve('D:\\somewhere\\custom'), 'sessions'))
+      process.env.DSH_HOME = 'C:\\somewhere\\custom'
+      assert.equal(sessionsRootDefault(), path.join(path.resolve('C:\\somewhere\\custom'), 'sessions'))
       process.env.DSH_HOME = ''
       assert.equal(sessionsRootDefault(), path.join(homedir(), '.dsh', 'sessions'))
     } finally {

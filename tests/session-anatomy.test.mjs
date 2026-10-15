@@ -26,7 +26,7 @@ function test(name, fn) { tests.push({ name, fn }) }
  * zstd magic，明文头会让它一帧都扫不到（踩过：整份报告全空）。
  */
 function buildSessionBytes(events, head = {}) {
-  const parts = [Buffer.from(JSON.stringify({ type: 'session', version: 4, id: 'session-anatomy-test', createdAt: 1, cwd: 'E:\\文档', ...head }) + '\n')]
+  const parts = [Buffer.from(JSON.stringify({ type: 'session', version: 4, id: 'session-anatomy-test', createdAt: 1, cwd: 'C:\\workspace', ...head }) + '\n')]
   for (const ev of events) parts.push(Buffer.from(JSON.stringify(ev) + '\n'))
   return Buffer.concat(parts.map(p => zstdCompressSync(p)))
 }
@@ -92,9 +92,9 @@ const root = mkdtempSync(path.join(tmpdir(), 'rf-anatomy-test-'))
 const bigFile = path.join(root, 'big.jsonl.zstd')
 {
   const evs = [
-    ...turnEvents({ turn: 1, seq: 10, provider: 'deepseek-official', model: 'deepseek-flash', inputTokens: 100, cacheReadTokens: 200000 }),
+    ...turnEvents({ turn: 1, seq: 10, provider: 'provider-a', model: 'model-a', inputTokens: 100, cacheReadTokens: 200000 }),
     ...turnEvents({
-      turn: 2, seq: 20, provider: 'buddy', model: 'hy3', inputTokens: 400000, cacheReadTokens: 127303,
+      turn: 2, seq: 20, provider: 'provider-b', model: 'model-b', inputTokens: 400000, cacheReadTokens: 127000,
       failure: { code: 'CONTEXT_WINDOW_EXCEEDED', message: 'prompt is too long: 100001 tokens > 100000 maximum' },
     }),
     { type: 'compaction/prune', seq: 30, time: 1700000005000, data: { shadowedSeqs: [10], shadowedTokenCount: 94299 } },
@@ -107,7 +107,7 @@ const bigFile = path.join(root, 'big.jsonl.zstd')
 // ── fixture 2：正常完成的会话 ───────────────────────────────────────────────
 const okFile = path.join(root, 'ok.jsonl.zstd')
 {
-  const evs = turnEvents({ turn: 1, seq: 10, provider: 'deepseek-official', model: 'deepseek-flash', inputTokens: 100, cacheReadTokens: 5000 })
+  const evs = turnEvents({ turn: 1, seq: 10, provider: 'provider-a', model: 'model-a', inputTokens: 100, cacheReadTokens: 5000 })
   writeFileSync(okFile, buildSessionBytes(evs))
 }
 
@@ -116,12 +116,12 @@ const noAdapterFile = path.join(root, 'noadapter.jsonl.zstd')
 {
   const evs = [
     ...turnEvents({
-      turn: 1, seq: 10, provider: 'workbuddy', model: 'deepseek-v4.1-flash',
+      turn: 1, seq: 10, provider: 'provider-c', model: 'model-c',
       inputTokens: 10, cacheReadTokens: 1000,
-      failure: { code: 'NO_ADAPTER', message: 'no adapter registered for provider "workbuddy"' },
+      failure: { code: 'NO_ADAPTER', message: 'no adapter registered for provider "provider-c"' },
     }),
-    // 失败之后用户又切了模型：结论必须仍指向 workbuddy，而不是 deepseek-official。
-    { type: 'model/selection', seq: 40, time: 1700000009000, data: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'high' } },
+    // 失败之后用户又切了模型：结论必须仍指向 provider-c，而不是 provider-a。
+    { type: 'model/selection', seq: 40, time: 1700000009000, data: { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' } },
   ]
   writeFileSync(noAdapterFile, buildSessionBytes(evs))
 }
@@ -130,8 +130,8 @@ const noAdapterFile = path.join(root, 'noadapter.jsonl.zstd')
 const markerFile = path.join(root, 'marker.jsonl.zstd')
 {
   const evs = turnEvents({
-    turn: 1, seq: 10, provider: 'deepseek-official', model: 'deepseek-flash',
-    inputTokens: 10, cacheReadTokens: 100, markerText: '正文里有 FORGE-OK-2026-10-15 这个标记',
+    turn: 1, seq: 10, provider: 'provider-a', model: 'model-a',
+    inputTokens: 10, cacheReadTokens: 100, markerText: '正文里有 FORGE-OK-TEST 这个标记',
   })
   writeFileSync(markerFile, buildSessionBytes(evs))
 }
@@ -139,8 +139,8 @@ const markerFile = path.join(root, 'marker.jsonl.zstd')
 test('大上下文 + 小窗口 → blocker，且上下文取 input+cacheRead', () => {
   const { status, report } = runAnatomy(bigFile)
   assert.equal(status, 2, 'blocker 必须给退出码 2')
-  assert.equal(report.usage.peak.contextTokens, 400000 + 127303, '峰值上下文 = input + cacheRead')
-  assert.equal(report.usage.peak.model, 'hy3')
+  assert.equal(report.usage.peak.contextTokens, 400000 + 127000, '峰值上下文 = input + cacheRead')
+  assert.equal(report.usage.peak.model, 'model-b')
   const codes = report.verdict.map(v => v.code)
   assert.ok(codes.includes('CONTEXT_WINDOW_EXCEEDED'), '必须有 CONTEXT_WINDOW_EXCEEDED：' + JSON.stringify(codes))
   assert.ok(codes.includes('COMPACTION_FAILED'), '压缩失败也要报：' + JSON.stringify(codes))
@@ -160,14 +160,14 @@ test('NO_ADAPTER 的结论指向失败轮的 provider，而不是最后一次切
   assert.equal(status, 2)
   const v = report.verdict.find(x => x.code === 'NO_ADAPTER')
   assert.ok(v !== undefined, '必须有 NO_ADAPTER 结论')
-  assert.ok(v.message.includes('workbuddy'), '必须指名 workbuddy，实际：' + v.message)
-  assert.equal(v.message.includes('deepseek-official'), false, '不能被最后一次 model/selection 带偏')
+  assert.ok(v.message.includes('provider-c'), '必须指名 provider-c，实际：' + v.message)
+  assert.equal(v.message.includes('provider-a'), false, '不能被最后一次 model/selection 带偏')
   const lastTurn = report.turns[report.turns.length - 1]
-  assert.equal(lastTurn.provider, 'workbuddy', '每轮结局要记录该轮真实 provider')
+  assert.equal(lastTurn.provider, 'provider-c', '每轮结局要记录该轮真实 provider')
 })
 
 test('伪造痕迹按 marker 命中并给出字符数', () => {
-  const { report } = runAnatomy(markerFile, ['--marker', 'FORGE-OK-2026-10-15'])
+  const { report } = runAnatomy(markerFile, ['--marker', 'FORGE-OK-TEST'])
   assert.equal(report.marker.hits.length, 1, '应命中 1 处')
   assert.equal(report.marker.hits[0].seq, 12, '命中 seq 应为 assistant/message 的 seq')
   assert.ok(report.marker.hits[0].chars > 0)
@@ -182,7 +182,7 @@ test('文本模式与 JSON 模式共用同一退出码，且文本模式能读�
   const text = cli(['--file', bigFile])
   assert.equal(text.status, 2, '文本模式下 blocker 也要退出码 2（两种模式口径必须一致）')
   assert.ok(text.stdout.includes('CONTEXT_WINDOW_EXCEEDED'), '文本里要有结论码')
-  assert.ok(text.stdout.includes('527,303'), '文本里要有人读的上下文数字：' + text.stdout.split('\n').slice(0, 8).join(' | '))
+  assert.ok(text.stdout.includes('527,000'), '文本里要有人读的上下文数字：' + text.stdout.split('\n').slice(0, 8).join(' | '))
   const json = cli(['--file', bigFile, '--json'])
   assert.equal(json.status, text.status, 'JSON 与文本的退出码必须相同')
 })

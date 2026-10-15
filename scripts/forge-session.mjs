@@ -44,8 +44,7 @@ for (let i = 0; i < args.length; i += 1) {
 const log = (...a) => console.log('[forge]', ...a)
 const die = msg => { console.error('[forge] 错误：' + msg); process.exit(1) }
 
-// DSH 桌面端可执行文件名。真实安装：E:\game\DeepSeekHarness\DeepSeek Harness.exe
-// （从开始菜单快捷方式 DeepSeek Harness.lnk 解析确认）。
+// DSH 桌面端可执行文件名（安装目录随机器不同，只认文件名）。
 const DSH_EXE = 'DeepSeek Harness.exe'
 
 /**

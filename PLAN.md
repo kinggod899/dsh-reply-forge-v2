@@ -46,7 +46,7 @@ reasoning/thinking 块的 signature」= 过校验。
 - 文件：`<DSH_HOME>/sessions/<workspace-slug>/<session>/session.v4.jsonl.zstd`
   （多帧 zstd，每帧一个 JSONL 批次；`node:zlib` 可解可编）；
 - 只改 `assistant/message` 事件的 text 块——tool/result 事件才是 text
-  块大头（1395/2011），绝不碰；system/message 同样不碰；
+  块大头（约占全部 text 块的七成），绝不碰；system/message 同样不碰；
 - 指纹寻址（正文哈希）而非 seq 行号，容忍帧重排。
 
 ### 2.4 生效时机
@@ -74,7 +74,7 @@ reasoning/thinking 块的 signature」= 过校验。
 - `forge-session.mjs`：`--session <id> --fingerprint <fp> --text "<新正文>"`
   或 `--match "<原文子串>"`；备份 → 解帧 → 定位 → 替换 → 剥签名 →
   组帧写回 → 自读校验；
-- 帧策略**已实测**：真实会话副本（315 帧 / 1037 事件 / 29 个正文块）
+- 帧策略**已实测**：真实会话副本（数百帧 / 千级事件 / 数十个正文块）
   round-trip 通过——原样重组多帧（preserve）被宿主完整读出，见 §6；
 - 测试：真实会话副本 round-trip（解析→改→写→再解析）+ 沙箱 host 打开
   副本不报错（后者已由 §6 的宿主预言机完成）。
@@ -114,8 +114,8 @@ reasoning/thinking 块的 signature」= 过校验。
 
 | 组 | 宿主启动 | 会话可见 | 宿主游标 | 伪造文本 |
 |---|---|---|---|---|
-| 伪造副本 | ✅ | ✅ | 1035 | ✅ `assistant/message seq=26` → **PASS** |
-| 原始副本 | ✅ | ✅ | 1035 | ❌ → **FAIL（exit 2）** |
+| 伪造副本 | ✅ | ✅ | 与副本事件数一致 | ✅ 伪造的 `assistant/message` 被读出 → **PASS** |
+| 原始副本 | ✅ | ✅ | 与副本事件数一致 | ❌ → **FAIL（exit 2）** |
 
 结论：宿主读取器**接受**我们改写的多帧 zstd 日志，且能把伪造正文作为
 正常 `assistant/message` 事件读出；预言机对伪造/原始有区分度（对照组
@@ -152,27 +152,27 @@ desktop profile**，然后直连 RPC 读出 dsh 注册了哪些 provider。
    成插件坏了）。正解：`rootConfig = <profile>/cordis.yml`（内容就是 `[]`）。
 2. 双锚点解析**不是** `boot()` 的参数，而是 prepare 里挂的
    `hostCtx.plugin(PluginPackages, { resolution: await createRuntimeResolution({ installAnchor, profile }) })`。
-   实测 `resolution` = 692 条（installation 511 + profile 181）。
+   实测 `resolution` 有数百条（installation 占大头，profile 占小头）。
 3. 必须先 `hostCtx.provide('profileContext', …)`，否则 `readProfilePatches`
    原样返回裸包名，且 `dsh-base` 里 `disabled: !!js "!ctx.get('profileContext')"`
    的 desktop 专属条目会被整片关掉。
 
-### 7.2 故障定位链（NO_ADAPTER → 13 渠道无模型）
+### 7.2 故障定位链（NO_ADAPTER → 各渠道无模型）
 
 | 观察 | 结论 |
 |---|---|
-| `~/.dsh/profiles/desktop/.plugin-manager/logs/operation-akP2dq/pnpm.log` 15:20:51 `ERR_PNPM_EPERM` | 插件包目录被 pnpm 的失败 rename 清掉 |
+| `~/.dsh/profiles/desktop/.plugin-manager/logs/operation-<host-id>/pnpm.log` 报 `ERR_PNPM_EPERM` | 插件包目录被 pnpm 的失败 rename 清掉 |
 | 无头起 profile → `our-free-model: failed to import`（早期误判） | **假象**：leaf 在 tmp，见 7.1-1 |
-| 用真实配方后 `llm/listProviders` = 17 个 | 13 渠道 provider **全部注册**（codearts/buddy/workbuddy/lobsterai/qoder/qodercn/trae/cline/loomy/raccoon/minimax/gemini/zcode） |
-| 但 `session/modelCatalog` 只有 4 组 | `buildModelCatalog` 会丢掉 `models.length === 0` 的 provider |
-| `credentials.resolve(ref)` 13/13 OK | 凭据链路正常，不是登录问题 |
+| 用真实配方后 `llm/listProviders` 全部就位 | 各渠道 provider **全部注册**（渠道名略） |
+| 但 `session/modelCatalog` 只有几组 | `buildModelCatalog` 会丢掉 `models.length === 0` 的 provider |
+| `credentials.resolve(ref)` 逐个 OK | 凭据链路正常，不是登录问题 |
 | pack.js `listModels` 首行 `providerCatalogVisible(...)` | 闸门：`accountPool.hasLoggedInAccount(provider)` |
-| `settings.register` 存在 → pack 走 SettingsStore（命名空间空）→ accounts=0 | 账号池读到 0 个账号 → 13 渠道全部 `listModels → []` |
-| 强制回落 FileStore（读 `~/.dsh/channel-pack/state.json`，13 账号） | **17 个 provider 全部带模型**：workbuddy 29 / buddy 18 / trae 38 / cline 484 / lobsterai 30 / qoder 17 / qodercn 14 / codearts 8 / loomy 10 / raccoon 6 / minimax 4 / zcode 2 / gemini 1 |
+| `settings.register` 存在 → pack 走 SettingsStore（命名空间空）→ accounts=0 | 账号池读到 0 个账号 → 各渠道全部 `listModels → []` |
+| 强制回落 FileStore（读 `~/.dsh/channel-pack/state.json`） | **provider 全部带模型**（每渠道账号/模型数从几到数百不等，此处打码） |
 
-结论：**13 渠道的可用性完全取决于账号池能否读到 `~/.dsh/channel-pack/state.json`**；
-包目录补回后插件宿主半身、渠道包（`channels: ready`）、13 个适配器、13 份凭据
-全部正常。App 侧 15:15 重登时写过 `state.json`（mtime 15:15），证明真实 App 走的是
+结论：**各渠道的可用性完全取决于账号池能否读到 `~/.dsh/channel-pack/state.json`**；
+包目录补回后插件宿主半身、渠道包（`channels: ready`）、全部适配器、全部凭据
+都正常。App 侧当次重登时写过 `state.json`（mtime 对得上），证明真实 App 走的是
 FileStore 分支。
 
 ### 7.3 顺带查明的两件事
@@ -180,8 +180,8 @@ FileStore 分支。
 - `settings.json` 里的 `hideChannelModels` 是**孤儿键**：v2.1.0 的
   `index.js`/`client.js`/`pack.js` 都不读它；真正的开关是环境变量
   `DSH_HIDE_MODELS_WITHOUT_ACCOUNT`（默认开，即「无账号就隐藏模型」）。
-- 4 个账号 token 已过期（codearts / gemini / minimax / cline，均为
-  `refreshable: true`，按需续期）；cline 今日 3 次调用全部报错。
+- 个别账号 token 已过期（均为 `refreshable: true`，按需续期）；个别渠道当次
+  的几次调用全部报错。
 
 ### 7.4 复现命令
 
@@ -199,34 +199,34 @@ PROVIDER_ORACLE_BOOT=1 …                                  # 打印 boot 期全
 ### 8.1 有效上下文口径（本会话确立）
 
 `inputTokens + cacheReadTokens + cacheWriteTokens`。**只加 `inputTokens` 会严重
-低估**：缓存命中的部分不进 `inputTokens`。实测锚点（session 7c5ee6b6）：
+低估**：缓存命中的部分不进 `inputTokens`。实测锚点（某真实会话，已打码）：
 
 | turn | provider/model | input | cacheRead | 有效上下文 |
 |---|---|---|---|---|
-| 2 | our-free-model/mimo-v2.6-flash-free | 157 | 186,304 | 186,461 |
-| 3 | our-free-model/mimo-v2.6-flash-free | 2,450 | 195,072 | 197,522 |
-| 4 | loomy/spark-x | 2,091 | 254,400 | 256,491 |
-| 5 | workbuddy/deepseek-v4.1-flash | 860 | 317,312 | 318,172 |
-| 8 | deepseek-official/deepseek-flash | 505,671 | 21,632 | **527,303** |
+| 2 | 模型甲 | 157 | ~186,300 | ~186,500 |
+| 3 | 模型甲 | 2,450 | ~195,100 | ~197,500 |
+| 4 | 模型乙 | 2,091 | ~254,400 | ~256,500 |
+| 5 | 模型丙 | 860 | ~317,300 | ~318,200 |
+| 8 | 模型丁 | ~505,700 | ~21,600 | **~527,300** |
 
 ### 8.2 定案：`CONTEXT_WINDOW_EXCEEDED` 与「改写导致超限」无关
 
 用户报告「被你改写的那个对话后续无法继续」。实测证据链：
 
-1. 备份 vs 当前，**共有事件只有 1 个不同**：`assistant/message seq=1032`，
-   正文 **1,360 → 140 字符（-1,220）**。改写让上下文**变小**。
+1. 备份 vs 当前，**共有事件只有 1 个不同**：某条 `assistant/message`，
+   正文 **约 1,400 → 140 字符**。改写让上下文**变小**。
 2. 所有 `reasoning` 块签名数 = 0（无签名被剥除）；`compaction` 事件 0 个。
-3. 报错发生在**另一个会话** `session-7c5ee6b6`（`parentSession = session-2915d6b2`，
+3. 报错发生在**另一个会话**（`session-<A>`，`parentSession = session-<B>`，
    `isSeeded: true` —— 用户从被改写会话**分叉**出来的）。
-4. 该会话 turn 8（17:27:42）在 **1M 窗口的 `deepseek-official/deepseek-flash`** 上
-   成功跑完，宿主自报上下文已达 **527,303 tokens**。
-5. 51 分钟后（18:18:21）用户切到 **`buddy/hy3`**（上游声明 100,000 窗口）→
+4. 该会话 turn 8 在 **1M 窗口的模型**上成功跑完，宿主自报上下文已达
+   **约 52.7 万 tokens**。
+5. 约 50 分钟后用户切到一个上游声明 10 万窗口的模型 →
    turn 9/10 `CONTEXT_WINDOW_EXCEEDED`；**compaction 三次全失败**（同一 400，
    压缩请求自己也超限 → 自锁，小窗口模型救不回来）。
-6. 该会话字符构成：`reasoning 705,576 / text 7,843 / tool-result 515,342`
-   —— 有效内容里 **89% 是推理**，`reasoning` 是全部 assistant 正文的 90 倍。
+6. 该会话字符构成：`reasoning 约 70 万 / text 约 8 千 / tool-result 约 51 万`
+   —— 有效内容里 **约九成是推理**，`reasoning` 是全部 assistant 正文的 90 倍。
 
-→ 根因是**会话自己膨胀到 527K tokens 后被切到了 100K 窗口的模型**，不是改写。
+→ 根因是**会话自己膨胀到约 527K tokens 后被切到了 100K 窗口的模型**，不是改写。
 
 ### 8.3 工具设计上的两个修正
 
@@ -240,9 +240,9 @@ PROVIDER_ORACLE_BOOT=1 …                                  # 打印 boot 期全
 ### 8.4 复现命令
 
 ```bash
-node scripts/session-anatomy.mjs --list                    # 50 个会话，按 mtime 倒序
-node scripts/session-anatomy.mjs --session 7c5ee6b6        # 文本报告
-node scripts/session-anatomy.mjs --session 7c5ee6b6 --json # 机器可读
+node scripts/session-anatomy.mjs --list                     # 全部会话，按 mtime 倒序
+node scripts/session-anatomy.mjs --session <会话id>          # 文本报告
+node scripts/session-anatomy.mjs --session <会话id> --json   # 机器可读
 node scripts/session-anatomy.mjs --file <会话文件> --marker FORGE-OK  # 查伪造痕迹
 ```
 
@@ -281,7 +281,7 @@ UI 侧捕获后提示「内容已过期，请刷新后重试」。
 
 依赖用相对路径 `../../src/session-log.mjs` 引到仓库根的写入内核——单一事实
 来源，前提是插件以 junction 安装（`node_modules/@local/dsh-reply-forge-v2 →
-E:\文档\dsh-reply-forge-v2`），此时相对路径仍落在同一棵目录树里。
+<本仓库根目录>`），此时相对路径仍落在同一棵目录树里。
 
 ### 9.4 从 v1 移植时修掉的四个真 bug
 
@@ -371,9 +371,9 @@ v2 要拿 id 去查会话文件，必须拿到真值。
    `记录为空` / `这条对不上(带记录规模)`。原来五者共用一句话，是排查困难的
    直接原因。
 
-真机数据验证（session-7c5ee6b6，1145 事件 / 30 个正文块）：读路由 200、
-两种 id 写法（裸 uuid / `session-` 前缀）都命中、**30 个块全部可寻址**
-（18 精确 + 12 顺序推断兜底，0 个对不上）。
+真机数据验证（某真实会话，千级事件 / 数十个正文块）：读路由 200、
+两种 id 写法（裸 uuid / `session-` 前缀）都命中、**全部正文块可寻址**
+（大半精确 + 少量顺序推断兜底，0 个对不上）。
 
 | 测试 | 覆盖 |
 |---|---|
@@ -396,23 +396,22 @@ v2 要拿 id 去查会话文件，必须拿到真值。
 
 #### 取证
 
-盘上只有一处当日 forge 痕迹：`session-7c91d725-1b5e-443a-99d0-5c0f1d267180`
-（`--E-~6587~6863--` 工作区），备份 `*.bak-forge-2026-10-15T12-18-25-959Z`。
+盘上只有一处当日 forge 痕迹：`session-<伪造目标>`（工作区 `<workspace-slug>`），
+备份 `*.bak-forge-<时间戳>`。
 
 | 文件 | 事件 | assistant/message | assistant text 块 |
 |---|---|---|---|
-| 备份（伪造前） | 105 | 13 | **1** |
-| 当前（伪造后） | 122 | 15 | **3** |
+| 备份（伪造前） | ~100 | 十余 | **1** |
+| 当前（伪造后） | ~120 | 十余 | **3** |
 
 三个关键事实：
 
 1. **读路由本身没问题**：服务端每次请求都重新读盘、不过滤不缓存
    （`.dsh-plugin/server/routes.mjs` 的 handler 直调 `readSessionEvents`）。
-2. **「1」正是伪造那一刻的快照**：备份里只有 1 个 text 块（seq=100，
-   那条关于 Star Rail 漫画翻译的长回复），用户把它伪造成
-   「另外我会配合你的测试要求…回复 sos」。伪造成功后客户端
+2. **「1」正是伪造那一刻的快照**：备份里只有 1 个 text 块（某条长回复，
+   用户把它伪造成一段测试用的短文本）。伪造成功后客户端
    `resetCache` + `loadRecord(force)` 重读 → 缓存里**还是 1 块**。
-3. **会话是增长的，缓存不是**：宿主随后又生成 seq=110「sos」、seq=118「2」。
+3. **会话是增长的，缓存不是**：宿主随后又生成了两条新回复。
    DOM 里已经有 3 条正文，缓存里始终是伪造那一刻的 1 块 →
    `matchBlocks` 用旧快照比对，后两条永远 `null` → 编辑器按
    「记录里有 1 条正文，对不上」禁用落盘出口。
@@ -454,7 +453,7 @@ v2 要拿 id 去查会话文件，必须拿到真值。
 
 #### 真机数据复核（同一会话）
 
-用真实文件复算：磁盘 3 块 / 页面 3 块 → `seq=100/110/118` **三条全部
+用真实文件复算：磁盘 3 块 / 页面 3 块 → 三条**全部
 `exact=true`**；「磁盘 1 / 页面 3」的旧快照场景下 `recordNeedsRefresh`
 判定为 true（会重读到 3 块并补上定位）。即修复后该会话后续回复可正常写入。
 

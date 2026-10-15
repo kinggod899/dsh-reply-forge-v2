@@ -30,7 +30,7 @@ export function requireCheckout(checkout) {
   if (req === null) {
     console.error('[diag] 未找到可用的 dsh dev checkout 锚点：' + checkout)
     console.error('[diag] 请设置 DSH_CHECKOUT 指向含 node_modules 的 dsh 源码检出，')
-    console.error('[diag] 或创建 scripts/diag.config.json：{ "checkout": "D:/path/to/checkout" }')
+    console.error('[diag] 或创建 scripts/diag.config.json：{ "checkout": "<dsh 源码检出路径>" }')
     process.exit(1)
   }
   return req
