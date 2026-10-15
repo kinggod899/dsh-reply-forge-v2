@@ -1,0 +1,15 @@
+# 依赖与临时产物
+node_modules/
+.diag-tmp/
+
+# 本地备份（会话文件备份、配置备份等）
+*.bak
+*.bak-*
+
+# 本地配置（本机路径，不随仓库分发）
+*.local.json
+
+# 系统杂物
+Thumbs.db
+desktop.ini
+.DS_Store
