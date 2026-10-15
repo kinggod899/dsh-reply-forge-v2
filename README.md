@@ -16,9 +16,35 @@ DSH 桌面端插件 v2：**真伪造**——改写的 AI 回复进入会话落�
 3. **还能继续对话**——改写后会话完整性不破坏：可正常打开、可继续
    流式输出、投影/状态机不错位，且可回滚。
 
-## 当前状态
+## 当前状态（2026-10-15）
 
-立项 / 设计阶段，无实现代码。设计与分期见 [PLAN.md](PLAN.md)。
+**v2.0 已实现并完成读取侧验收；v2.1 / v2.2 未开工。** 设计与实证见 [PLAN.md](PLAN.md)。
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| v2.0 | 关闭态落盘改写器（CLI） | ✅ 实现完成，读取侧验收通过 |
+| v2.0 | 真机重启后模型侧采信 | ⬜ 待用户实测 |
+| v2.1 | 运行态写入（探针先行） | ⬜ 未开工 |
+| v2.2 | UI 合一（dsh 插件形态） | ⬜ 未开工 |
+
+已落地的代码：
+
+- `src/session-log.mjs` —— 只读层（多帧 zstd JSONL 解析、正文块收窄），
+  从 v1 移植，自带 52 个真实会话的解析验证史；
+- `src/session-write.mjs` —— 写入器核心：指纹寻址、剥签名、多帧重组、
+  原子写、写后自读校验；
+- `src/checkout.mjs` —— 会话副本检出的公共逻辑；
+- `scripts/forge-session.mjs` —— v2.0 写入 CLI（含 `--dry-run` / `--restore` /
+  dsh 运行中拒绝写入）；
+- `scripts/host-oracle.mjs` —— 宿主预言机：用宿主自己的 dsh 起 slim host，
+  直连 RPC 读回改写后的会话，双跑（伪造 vs 原始）有区分度；
+- `scripts/provider-oracle.mjs` —— 照抄 App 真实启动配方起完整 desktop
+  profile，读 provider 注册表（用于定位 13 渠道故障）；
+- `scripts/session-anatomy.mjs` —— 会话解剖 / 上下文预算体检（只读），
+  回答「这个会话还能不能继续对话」；
+- `scripts/frame-anatomy.mjs` —— 帧结构解剖辅助工具。
+
+测试 **25/25**：`session-log` 11 + `session-write` 7 + `session-anatomy` 7。
 
 ## 与 v1 的关系
 
