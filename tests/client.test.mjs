@@ -361,6 +361,10 @@ test('写入会话记录 → POST 载荷正确（seq/blockIndex/expectText/自�
 
   assert.equal(confirmCalls.length, 1, '落盘是不可逆操作，必须二次确认')
   assert.ok(confirmCalls[0].includes('重启 DSH'), '确认文案必须讲明需要重启')
+  // 用户实测反馈：只写「别继续对话」会让人以为「重启后也不能聊了」。
+  // 文案必须把两件事分开说清——重启前别聊（宿主内存是旧的）+ 重启后可以正常聊。
+  assert.ok(confirmCalls[0].includes('重启前'), '确认文案必须点明限制只作用于「重启前」')
+  assert.ok(confirmCalls[0].includes('重启之后就可以正常继续聊'), '必须明确给出「重启后可以继续聊」的结论')
   const post = calls.find(c => c.url.includes('/session/forge'))
   assert.ok(post !== undefined, '必须发出落盘请求')
   assert.equal(post.init.method, 'POST')
